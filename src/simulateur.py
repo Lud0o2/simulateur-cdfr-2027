@@ -1,7 +1,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from functools import cache
-from math import atan2, cos, hypot, isfinite, pi, radians, sin, sqrt
+from functools import cache, lru_cache
+from math import atan2, cos, hypot, isfinite, pi, radians, remainder, sin, sqrt
 from pathlib import Path
 import tomllib
 
@@ -13,11 +13,13 @@ Rectangle = tuple[float, float, float, float]
 TABLE_WIDTH = 3000
 TABLE_HEIGHT = 2000
 SPEED = 1000  # mm/s
+DRIVE_ACCELERATION = 1000  # mm/s² en translation
 TURN_STEP = radians(15)
-TURN_SPEED = radians(180)
+TURN_SPEED = radians(360)
 TURN_ACCELERATION = radians(1200)  # rad/s², effort de pivot provisoire
 ROBOT_FILE = Path(__file__).resolve().parents[1] / "RobotRobotronik.toml"
 START = (250.0, 1000.0)
+THRONE_ROOM = (0, 750, 500, 1250)  # Règlement Eurobot 2027, § D.3 et plan G.1.
 TABLE = ((0, 0), (TABLE_WIDTH, 0), (TABLE_WIDTH, TABLE_HEIGHT), (0, TABLE_HEIGHT))
 # Règlement Eurobot 2027, § D.4 et plan G.1 (X depuis le côté jaune).
 START_BLOCKS = (
@@ -29,7 +31,6 @@ CONTACT_GAP = 1e-6  # mm, évite les chevauchements dus aux arrondis
 PHYSICS_STEP = 1 / 480  # contacts plus stables quand une pile est coincée
 ROBOT_MASS = 5.0  # kg, masse effective provisoire pour les contacts
 PILE_MASS = 0.09
-DRIVE_ACCELERATION = 6000  # mm/s², effort disponible pendant la poussée
 FLOOR_DECELERATION = 4200  # mm/s²
 FLOOR_ANGULAR_DECELERATION = 10  # rad/s²
 SUCTION_REACH = 5  # mm
@@ -102,6 +103,13 @@ def rectangle_corners(rectangle: Rectangle) -> tuple[Point, ...]:
     return (left, top), (right, top), (right, bottom), (left, bottom)
 
 
+def travel_time(distance: float) -> float:
+    """Durée idéale d'une translation de l'arrêt à l'arrêt."""
+    if distance < SPEED**2 / DRIVE_ACCELERATION:
+        return 2 * sqrt(distance / DRIVE_ACCELERATION)
+    return distance / SPEED + SPEED / DRIVE_ACCELERATION
+
+
 def _wall_zone(x: float, y: float, angle: float = 0) -> tuple[Point, ...]:
     return tuple(tuple(pymunk.Vec2d(x, y) + pymunk.Vec2d(*vertex).rotated(radians(angle)))
                  for vertex in rectangle_corners((-200, -100, 200, 100)))
@@ -118,31 +126,60 @@ def _world_corners(shape: pymunk.Poly) -> tuple[Point, ...]:
     return tuple(tuple(shape.body.local_to_world(vertex)) for vertex in shape.get_vertices())
 
 
+@lru_cache(maxsize=4096)
+def _polygon_bounds(polygon):
+    xs, ys = zip(*polygon)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def polygon_contact(
     position: Point, delta: Point, corners: tuple[Point, ...], footprint: tuple[Point, ...],
     *, include_boundary: bool = False,
 ) -> float:
     """Renvoie la fraction du trajet où les deux polygones commencent à se chevaucher."""
+    return swept_contact(position, delta, contact_axes(corners, footprint), include_boundary=include_boundary)
+
+
+def throne_room_score(position: Point, footprint: tuple[Point, ...]) -> int:
+    """Points de retour pour la projection d'un châssis à l'arrêt."""
+    x, y = position
+    left, top, right, bottom = THRONE_ROOM
+    if all(left <= x + dx <= right and top <= y + dy <= bottom for dx, dy in footprint):
+        return 10
+    return 5 if polygon_contact(position, (0, 0), rectangle_corners(THRONE_ROOM), footprint) < 1 else 0
+
+
+def contact_axes(corners, footprint):
+    for (ax, ay), (bx, by) in (*edges(footprint), *edges(corners)):
+        ax, ay = by - ay, ax - bx
+        offsets = [px * ax + py * ay for px, py in footprint]
+        bounds = [px * ax + py * ay for px, py in corners]
+        yield ax, ay, min(offsets), max(offsets), min(bounds), max(bounds)
+
+
+def swept_contact(position, delta, axes, *, include_boundary=False):
     x, y = position
     dx, dy = delta
     enter, leave = 0.0, 1.0
-    for (ax, ay), (bx, by) in (*edges(footprint), *edges(corners)):
-        ax, ay = by - ay, ax - bx
+    for ax, ay, lo, hi, other_low, other_high in axes:
         center = x * ax + y * ay
-        offsets = [px * ax + py * ay for px, py in footprint]
-        low, high = center + min(offsets), center + max(offsets)
-        bounds = [px * ax + py * ay for px, py in corners]
-        other_low, other_high = min(bounds), max(bounds)
+        low, high = center + lo, center + hi
         speed = dx * ax + dy * ay
         if speed == 0:
             tolerance = CONTACT_GAP * hypot(ax, ay) if include_boundary else 0
             if high <= other_low - tolerance or low >= other_high + tolerance:
                 return 1.0
             continue
-        first = (other_low - high) / speed
-        last = (other_high - low) / speed
-        enter = max(enter, min(first, last))
-        leave = min(leave, max(first, last))
+        if speed > 0:
+            first = (other_low - high) / speed
+            last = (other_high - low) / speed
+        else:
+            first = (other_high - low) / speed
+            last = (other_low - high) / speed
+        if first > enter:
+            enter = first
+        if last < leave:
+            leave = last
         if enter >= leave:
             return 1.0
     return enter
@@ -192,6 +229,7 @@ class Movement:
     end: Point
     blocked: bool
     turn: bool = False
+    rotation_blocked: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,8 +259,16 @@ class _Pile:
     floor: tuple[pymunk.Constraint, pymunk.Constraint]
     size: Point
     grip: _Grip | None = None
+    _block: Block | None = None
+
+    def free_block(self) -> Block:
+        position, angle = tuple(self.body.position), self.body.angle
+        if self._block is None or self._block.position != position or self._block.angle != angle:
+            self._block = Block(position, angle, _world_corners(self.shape))
+        return self._block
 
 
+@lru_cache(maxsize=4096)
 def scoring_zones(block: Block) -> tuple[tuple[int, ...], bool]:
     walls = tuple(index for index, zone in enumerate(WALL_ZONES) if
                   polygon_contact((0, 0), (0, 0), zone, block.corners, include_boundary=True) < 1)
@@ -237,6 +283,11 @@ def scoring_zones(block: Block) -> tuple[tuple[int, ...], bool]:
         if dx * dx + dy * dy <= (TOWER_RADIUS + CONTACT_GAP) ** 2:
             return (), True
     return (), False
+
+
+def free_wall_slots(blocks: Iterable[Block]) -> int:
+    occupied = {zone for block in blocks for zone in scoring_zones(block)[0]}
+    return len(WALL_ZONES) - len(occupied)
 
 
 def construction_score(sites: Iterable[tuple[tuple[int, ...], bool]]) -> int:
@@ -275,6 +326,8 @@ class Simulation:
         self.time = 0.0
         self.movement: Movement | None = None
         self._pivot: pymunk.PivotJoint | None = None
+        self._rolling_target: float | None = None
+        self._guard_translation = False
         self._remainder = 0.0
         self._space = pymunk.Space()
         self._space.iterations = 30
@@ -338,28 +391,51 @@ class Simulation:
     @property
     def score(self) -> int:
         """Points de construction jaunes d'après la pose actuelle des piles libres."""
-        return construction_score(scoring_zones(self._block(pile)) for pile in self._piles if pile.grip is None)
+        return self.score_for_blocks(self.blocks)
+
+    def score_for_blocks(self, blocks: tuple[Block, ...]) -> int:
+        """Calcule le score à partir des poses de toutes les piles au pas courant."""
+        return construction_score(scoring_zones(block) for pile, block in zip(self._piles, blocks)
+                                  if pile.grip is None)
+
+    @property
+    def return_score(self) -> int:
+        return 0 if self.moving else throne_room_score(self.position, self.footprint)
 
     def held_pile(self, cup: int) -> int | None:
         return next((index for index, pile in enumerate(self._piles) if pile.grip and pile.grip.cup == cup), None)
 
     def can_turn_freely(self, angle: float) -> bool:
-        position, footprint = self.position, self.footprint
-        destination = tuple(pymunk.Vec2d(*vertex).rotated(angle) for vertex in footprint)
-        return not self._turn_crosses_border(position, footprint, destination, angle) and not any(
-            self._turn_hits(position, footprint, destination, angle, polygon)
-            for polygon in (*(rectangle_corners(obstacle) for obstacle in self.obstacles),
-                            *(block.corners for block in self.blocks))
-        )
+        polygons = (*(rectangle_corners(obstacle) for obstacle in self.obstacles),
+                    *(pile.free_block().corners for pile in self._piles if not pile.grip))
+        return self.rotation_clear(self.position, self.footprints(), angle, polygons)
+
+    @classmethod
+    def rotation_clear(cls, position, footprints, angle, polygons) -> bool:
+        x, y = position
+        bounded = [(polygon, _polygon_bounds(polygon)) for polygon in polygons]
+        for footprint in footprints:
+            destination = tuple(pymunk.Vec2d(*vertex).rotated(angle) for vertex in footprint)
+            if cls._turn_crosses_border(position, footprint, destination, angle):
+                return False
+            radius = max(hypot(*vertex) for vertex in footprint) + CONTACT_GAP
+            for polygon, (left, top, right, bottom) in bounded:
+                if left > x + radius or right < x - radius or top > y + radius or bottom < y - radius:
+                    continue
+                if cls._turn_hits(position, footprint, destination, angle, polygon):
+                    return False
+        return True
 
     @staticmethod
     def _block(pile: _Pile) -> Block:
         grip = pile.grip
-        shape = grip.shape if grip else pile.shape
+        if grip is None:
+            return pile.free_block()
+        shape = grip.shape
         body = shape.body
         return Block(
             tuple(body.local_to_world(shape.center_of_gravity)),
-            body.angle + grip.angle if grip else body.angle,
+            body.angle + grip.angle,
             _world_corners(shape),
         )
 
@@ -396,36 +472,47 @@ class Simulation:
     def _capture_piles(self):
         captured = False
         for number in sorted(self._armed_cups):
-            mount, normal = self.geometry.mounts[number - 1]
-            point = self._robot.local_to_world(mount)
             for pile in self._piles:
-                if pile.grip:
-                    continue
-                x, y = pile.body.world_to_local(point)
-                length, width = pile.size
-                if abs(x) > length / 2 or abs(abs(y) - width / 2) > SUCTION_REACH:
-                    continue
-                facing = normal.rotated(self.heading - pile.body.angle)
-                if (-facing.y if y > 0 else facing.y) < SUCTION_ALIGNMENT:
-                    continue
-                # Une forme sur le châssis garde la pose exacte de la pile pendant les contacts.
-                shape = pymunk.Poly(self._robot, [
-                    self._robot.world_to_local(vertex) for vertex in _world_corners(pile.shape)
-                ])
-                shape.friction = pile.shape.friction
-                self._space.remove(*pile.floor, pile.shape, pile.body)
-                self._space.add(shape)
-                pile.grip = _Grip(number, shape, pile.body.angle - self.heading)
-                self._armed_cups.remove(number)
-                captured = True
-                break
+                if self._capture(number, pile):
+                    captured = True
+                    break
         if captured and self.moving and not self.movement.turn:
             previous = self.movement
             self.move_to(*previous.end)
             if previous.blocked:
                 self.movement = replace(self.movement, blocked=True)
 
-    def _footprints(self):
+    def grip_pile(self, number: int, index: int) -> bool:
+        """Essaie de saisir la pile désignée avec une ventouse libre, à l'arrêt."""
+        return (not self.moving and type(number) is int and 1 <= number <= len(self.geometry.mounts)
+                and type(index) is int and 0 <= index < len(self._piles)
+                and self.held_pile(number) is None and self._capture(number, self._piles[index]))
+
+    def _capture(self, number: int, pile: _Pile) -> bool:
+        if pile.grip:
+            return False
+        mount, normal = self.geometry.mounts[number - 1]
+        point = self._robot.local_to_world(mount)
+        x, y = pile.body.world_to_local(point)
+        length, width = pile.size
+        if abs(x) > length / 2 or abs(abs(y) - width / 2) > SUCTION_REACH:
+            return False
+        facing = normal.rotated(self.heading - pile.body.angle)
+        if (-facing.y if y > 0 else facing.y) < SUCTION_ALIGNMENT:
+            return False
+        # Une forme sur le châssis garde la pose exacte de la pile pendant les contacts.
+        shape = pymunk.Poly(self._robot, [
+            self._robot.world_to_local(vertex) for vertex in _world_corners(pile.shape)
+        ])
+        shape.friction = pile.shape.friction
+        self._space.remove(*pile.floor, pile.shape, pile.body)
+        self._space.add(shape)
+        pile.grip = _Grip(number, shape, pile.body.angle - self.heading)
+        self._armed_cups.discard(number)
+        return True
+
+    def footprints(self):
+        """Contours relatifs au centre du châssis, avec l'orientation actuelle."""
         yield self.footprint
         for pile in self._piles:
             if pile.grip:
@@ -441,37 +528,36 @@ class Simulation:
             raise ValueError("La distance à parcourir doit être finie.")
         if self._pivot is not None:
             self._stop()
-        fraction = 1.0
-        if distance > 0:
-            for footprint in self._footprints():
-                fraction = min(fraction, table_contact(start, delta, footprint))
-                for obstacle in self.obstacles:
-                    fraction = min(fraction, polygon_contact(start, delta, rectangle_corners(obstacle), footprint))
+        self._drive_target = (x, y)
+        self._guard_translation = self._rolling_target is not None
+        fraction = self._static_travel(start, delta) if distance and not self._guard_translation else 1.0
         blocked = fraction < 1.0
         if blocked:
             fraction = max(0.0, fraction - CONTACT_GAP / distance)
         end = tuple(self._robot.position + delta * fraction) if blocked else (x, y)
-        previous = self.movement
         self.movement = Movement(end, blocked)
         self._best_distance = distance * fraction
         self._stall_time = 0.0
         if self._best_distance == 0:
             self._stop()
             return
-        was_moving = self.moving
-        if not was_moving:
+        if not self.moving:
             self._robot.body_type = pymunk.Body.DYNAMIC
             self._robot.mass = ROBOT_MASS
             self._robot.moment = float("inf")
         direction = delta / distance
-        new_speed = min(SPEED, self._best_distance / PHYSICS_STEP)
-        if not was_moving or self._robot.velocity.length >= SPEED - 1e-6:
-            self._robot.velocity = direction * new_speed
-        elif (pymunk.Vec2d(*previous.end) - self._robot.position).dot(direction) < 0:
-            # En repartant dans l'autre sens, le robot holonome quitte le contact.
-            self._robot.velocity = direction * min(new_speed, self._robot.velocity.length)
+        self._robot.velocity = direction * max(0, self._robot.velocity.dot(direction))
+
+    def _static_travel(self, start, delta):
+        fraction = 1.0
+        for footprint in self.footprints():
+            fraction = min(fraction, table_contact(start, delta, footprint))
+            for obstacle in self.obstacles:
+                fraction = min(fraction, polygon_contact(start, delta, rectangle_corners(obstacle), footprint))
+        return fraction
 
     def _stop(self):
+        self._rolling_target = None
         if self._pivot is not None:
             self._space.remove(self._pivot)
             self._pivot = None
@@ -491,20 +577,43 @@ class Simulation:
         move = self.movement
         delta = pymunk.Vec2d(*move.end) - self._robot.position
         distance = delta.length
-        target_velocity = delta / PHYSICS_STEP
-        if distance > SPEED * PHYSICS_STEP:
-            target_velocity = delta * (SPEED / distance)
+        if self._rolling_target is not None:
+            angle = remainder(self._rolling_target - self.heading, 2 * pi)
+            limit = TURN_SPEED * PHYSICS_STEP
+            step_angle = max(-limit, min(limit, angle))
+            if self.can_turn_freely(step_angle):
+                if abs(angle) <= limit:
+                    self._set_heading(self._rolling_target)
+                    self._rolling_target = None
+                else:
+                    self._set_heading(self.heading + step_angle)
+            elif distance < 1e-7:
+                self.movement = move = replace(move, rotation_blocked=True)
+                self._rolling_target = None
+        speed = min(SPEED, sqrt(2 * DRIVE_ACCELERATION * distance))
+        target_velocity = delta * (min(speed / distance, 1 / PHYSICS_STEP) if distance else 0)
         # Le solveur peut contrer la poussée. La commande retrouve progressivement sa vitesse.
-        correction = target_velocity - self._robot.velocity
-        if correction.length > DRIVE_ACCELERATION * PHYSICS_STEP and distance > SPEED * PHYSICS_STEP:
-            correction = correction.normalized() * DRIVE_ACCELERATION * PHYSICS_STEP
-        self._robot.velocity += correction
+        velocity = self._robot.velocity
+        correction = target_velocity - velocity
+        max_correction = DRIVE_ACCELERATION * PHYSICS_STEP
+        if correction.length > max_correction:
+            correction = correction.normalized() * max_correction
+        velocity += correction
+        if velocity.dot(delta) * PHYSICS_STEP > distance**2:
+            velocity = delta / PHYSICS_STEP
+        if self._guard_translation and velocity.length > 0:
+            travel = velocity * PHYSICS_STEP
+            fraction = self._static_travel(self.position, travel)
+            if fraction < 1:
+                velocity *= max(0, fraction - CONTACT_GAP / travel.length)
+        self._robot.velocity = velocity
         self._space.step(PHYSICS_STEP)
 
         remaining = self._robot.position.get_distance(move.end)
         if remaining < 1e-7:
             self._robot.position = move.end
-            self._stop()
+            if self._rolling_target is None:
+                self._stop()
         elif self._stalled(remaining, 0.1):
             self.movement = replace(move, end=self.position, blocked=True)
             self._stop()
@@ -520,6 +629,16 @@ class Simulation:
     def turn_by(self, angle: float):
         if not -pi < angle < pi:
             raise ValueError("La rotation doit être comprise entre -180° et 180°.")
+        if not angle:
+            return
+        if self.moving and self._pivot is None:
+            self._rolling_target = self.heading + angle
+            if not self._guard_translation:
+                self._guard_translation = True
+                self.movement = Movement(self._drive_target, False)
+                self._best_distance = self._robot.position.get_distance(self._drive_target)
+                self._stall_time = 0.0
+            return
         if self._pivot is not None and (self._turn_target - self.heading) * angle > 0:
             return
         position = self.position
@@ -527,7 +646,7 @@ class Simulation:
         target = self.heading + angle
         turns = tuple(
             (footprint, tuple(pymunk.Vec2d(*vertex).rotated(angle) for vertex in footprint))
-            for footprint in self._footprints()
+            for footprint in self.footprints()
         )
         fixed = tuple(rectangle_corners(obstacle) for obstacle in self.obstacles)
         blocked = any(
@@ -540,7 +659,7 @@ class Simulation:
             return
         if angle and any(
             self._turn_hits(position, footprint, destination, angle, corners)
-            for corners in (_world_corners(pile.shape) for pile in self._piles if not pile.grip)
+            for corners in (pile.free_block().corners for pile in self._piles if not pile.grip)
             for footprint, destination in turns
         ):
             self._robot.body_type = pymunk.Body.DYNAMIC
@@ -609,6 +728,8 @@ class Simulation:
         steps = int((self._remainder + 1e-12) / PHYSICS_STEP)
         self._remainder = max(0.0, self._remainder - steps * PHYSICS_STEP)
         for _ in range(steps):
+            if not self.moving and not self._armed_cups and all(pile.grip or pile.body.is_sleeping for pile in self._piles):
+                break
             self._step()
             if self._armed_cups:
                 self._capture_piles()

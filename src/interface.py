@@ -96,12 +96,15 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         for _ in (simulation.blocks if replay is None else replay.frame["piles"])
     ]
     path = canvas.create_line(0, 0, 0, 0, fill=accent, width=2, dash=(4, 5), state="hidden")
+    cups_at_start = simulation.suction_cups if replay is None else replay.frame["cups"]
+    # Le châssis masque les supports intérieurs, y compris dans les anciens replays.
+    supports = [canvas.create_line(0, 0, 0, 0, fill=accent, width=2) for _ in cups_at_start]
     robot = canvas.create_polygon(0, 0, 0, 0, 0, 0, fill=background, outline=accent, width=2)
     front = canvas.create_line(0, 0, 0, 0, fill=foreground, width=2, arrow="last", arrowshape=(7, 8, 3))
     cup_items = [
         (canvas.create_oval(0, 0, 0, 0, outline=foreground),
          canvas.create_text(0, 0, text=str(number), font=(font, 8, "bold")))
-        for number, _ in enumerate(simulation.suction_cups if replay is None else replay.frame["cups"], 1)
+        for number, _ in enumerate(cups_at_start, 1)
     ]
     panel = surface if replay is not None else background
     footer = tk.Frame(content, bg=panel, padx=10 if replay is not None else 0, pady=6)
@@ -116,13 +119,15 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
             move = simulation.movement
             moving = simulation.moving
             target = move.end if moving and not move.turn else None
-            blocked = move is not None and move.blocked
+            blocked = move is not None and (move.blocked or move.rotation_blocked)
             if target is not None:
                 label = "En déplacement"
             elif moving:
                 label = "En rotation"
             elif move is None:
                 label = "Au départ"
+            elif move.rotation_blocked:
+                label = "Rotation bloquée"
             elif move.turn:
                 label = "Rotation bloquée" if blocked else "Cap réglé"
             else:
@@ -132,8 +137,7 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
             points, position, angle = frame["score"], frame["position"], frame["heading"]
             footprint, piles, cups = frame["robot"], frame["piles"], frame["cups"]
             target, blocked, label = frame["target"], frame["blocked"], frame["action"]
-            remaining = max(0, replay.duration - replay.time)
-            readout.configure(text=f"{remaining:.1f} s restantes")
+            readout.configure(text=f"{replay.time:.1f} s · fin à {replay.duration:.1f} s")
 
         score.configure(text=str(points))
         for item, corners in zip(block_items, piles):
@@ -144,8 +148,10 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         canvas.coords(robot, *(coordinate for vertex in vertices for coordinate in vertex))
         nose = 65 * scale
         canvas.coords(front, screen_x, screen_y, screen_x + nose * cos(angle), screen_y + nose * sin(angle))
-        for (oval, number), (mount, enabled) in zip(cup_items, cups):
+        center_x, center_y = (sum(axis) / len(vertices) for axis in zip(*vertices))
+        for support, (oval, number), (mount, enabled) in zip(supports, cup_items, cups):
             cx, cy = (border + scale * value for value in mount)
+            canvas.coords(support, center_x, center_y, cx, cy)
             canvas.coords(oval, cx - 8, cy - 8, cx + 8, cy + 8)
             canvas.coords(number, cx, cy)
             canvas.itemconfigure(oval, fill=warning if enabled else "#474e56")

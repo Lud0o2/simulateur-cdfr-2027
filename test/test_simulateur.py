@@ -1,15 +1,27 @@
 import json
 import unittest
 from functools import partial
-from math import cos, dist, radians, sin, sqrt
+from itertools import groupby
+from math import cos, dist, pi, radians, remainder, sin, sqrt
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import mock_open, patch
 
+import numpy as np
 from pymunk import Vec2d
 
-from src.match import MATCH_SECONDS, Replay, play_match, save_replay
-from src.simulateur import START, TURN_STEP, RobotGeometry, Simulation, load_robot
+from src.match import (
+    ALIGNED_ANGLES, MATCH_SECONDS, Replay, _action_state, _approach, _clear, _drop_approach,
+    _follow, _pickup_approach, _route, place_pile, play_match, save_replay, take_pile,
+)
+from src.reseau import (
+    ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, LAYERS, TABLE_DIAGONAL, MatchPolicy, Network,
+    _ReplayDemonstration, _mutate_drop_pose, _replay_examples, _replay_rank, features, train_matches,
+)
+from src.simulateur import (
+    START, START_BLOCKS, TOWER_CENTERS, TURN_STEP, WALL_ZONES, RobotGeometry, Simulation, load_robot,
+    rectangle_corners, travel_time,
+)
 
 
 # La géométrie de référence garde les scénarios reproductibles après édition du TOML.
@@ -21,19 +33,463 @@ reference_simulation = partial(Simulation, robot=RobotGeometry(FOOTPRINT, (
     ((-FRONT / 2, SIDE / 4), Vec2d(1, 0).rotated(radians(120))),
     ((-FRONT / 2, -SIDE / 4), Vec2d(1, 0).rotated(radians(-120))),
 )))
+two_pile_simulation = partial(
+    Simulation,
+    blocks=((1445, 440, 1555, 760), (1445, 1040, 1555, 1360)),
+    robot=RobotGeometry(FOOTPRINT, (((FRONT, -100), Vec2d(1, 0)), ((FRONT, 100), Vec2d(1, 0)))),
+)
+
+
+class TrainingReplayTest(unittest.TestCase):
+    def test_random_match_explores_past_the_eight_fastest_pickups(self):
+        policy = MatchPolicy(object(), rng=np.random.default_rng(7), random_match=True)
+        choices = [(1 + pile, pile, 1) for pile in range(10)]
+        simulation = Simulation()
+        selected = set()
+        for _ in range(40):
+            ordered = policy.order(simulation, {}, choices, pickup=True, can_finish=True)
+            self.assertCountEqual(ordered, choices)
+            selected.add(ordered[0][1])
+        self.assertIn(9, selected)
+
+    def test_keeps_and_reuses_an_opening_below_the_record_after_reloading(self):
+        incumbent = Network(np.random.default_rng(7))
+        exploration_modes = []
+        remembered = np.full(LAYERS[0], 2, dtype=np.float32)
+
+        def play(_simulation, *, policy, record_frames=True):
+            if policy.rng is None:
+                return {"score": 50, "duree": 20}
+            if not record_frames:
+                exploration_modes.append(policy.random_match)
+            if policy.random_match:
+                policy.history.append((remembered, 0))
+                return {"score": 42, "duree": 25, "ouverture": (4, 1)}
+            policy.history.append((np.zeros(LAYERS[0], dtype=np.float32), 0))
+            return {"score": 48, "duree": 21}
+
+        with (patch("src.reseau.play_match", side_effect=play),
+              patch("src.reseau.os.process_cpu_count", return_value=1, create=True),
+              patch.object(Network, "train") as train,
+              TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory):
+            best, _, _, _ = train_matches(8, 7, incumbent, resume=True)
+            self.assertIs(best, incumbent)
+            self.assertEqual(exploration_modes, [False] * 7 + [True])
+            path = Path(directory) / "reseau.npz"
+            best.save(path)
+            loaded = Network.load(path)
+            self.assertEqual(loaded.experience[4, 1][0], (42, -25))
+            self.assertEqual(loaded.training_matches, 8)
+            train.reset_mock()
+            train_matches(1, 7, loaded, resume=True)
+            inputs, targets, _ = train.call_args.args
+            np.testing.assert_array_equal(inputs[-1], remembered)
+            self.assertAlmostEqual(float(targets[-1]), (42 + 0.5 * (1 - 25 / MATCH_SECONDS)) / 8)
+
+    def test_short_sessions_continue_the_random_match_schedule(self):
+        network = Network(np.random.default_rng(7))
+        network.training_matches = 7
+
+        def play(_simulation, *, policy, record_frames=True):
+            if policy.rng is not None:
+                self.assertTrue(policy.random_match)
+            return {"score": 50, "duree": 20}
+
+        with patch("src.reseau.play_match", side_effect=play):
+            train_matches(1, 7, network, resume=True)
+        self.assertEqual(network.training_matches, 8)
+
+    def test_deposit_mutations_are_kept_only_when_the_autonomous_match_improves(self):
+        incumbent = Network(np.random.default_rng(0))
+        first = _mutate_drop_pose(incumbent, np.random.default_rng(4))
+        second = _mutate_drop_pose(first, np.random.default_rng(0))
+        self.assertNotEqual(first.drop_offsets, incumbent.drop_offsets)
+        self.assertNotEqual(second.drop_angles, first.drop_angles)
+        ranks = {(incumbent.drop_offsets, incumbent.drop_angles): (50, 22.7),
+                 (first.drop_offsets, first.drop_angles): (50, 22.0),
+                 (second.drop_offsets, second.drop_angles): (49, 21.0)}
+
+        def play(_simulation, *, policy, record_frames=True):
+            score, duration = ranks[policy.drop_offsets, policy.drop_angles]
+            return {"score": score, "duree": duration}
+
+        with (patch("src.reseau.play_match", side_effect=play),
+              patch("src.reseau._mutate_drop_pose", side_effect=(first, second)) as mutate,
+              patch("src.reseau.os.process_cpu_count", return_value=1, create=True)):
+            best, winner, _, _ = train_matches(2, 7, incumbent, resume=True, mutate_deposits=True)
+        self.assertEqual([call.args[0] for call in mutate.call_args_list], [incumbent, first])
+        self.assertIs(best, first)
+        self.assertEqual(_replay_rank(winner), (50, -22))
+        self.assertEqual(incumbent.drop_offsets, CENTERED_OFFSETS)
+
+    def test_deposit_mutations_can_reach_200_mm_and_keep_a_single_changed_pose(self):
+        network = Network(np.random.default_rng(0))
+        rng = np.random.default_rng(9)
+        farthest = 0
+        for _ in range(64):
+            mutant = _mutate_drop_pose(network, rng)
+            farthest = max(farthest, *(dist((0, 0), offset) for offset in mutant.drop_offsets))
+            changes = sum(a != b for a, b in zip(mutant.drop_offsets, network.drop_offsets))
+            changes += sum(a != b for a, b in zip(mutant.drop_angles, network.drop_angles))
+            self.assertEqual(changes, 1)
+        self.assertEqual(farthest, DROP_OFFSET_LIMIT)
+
+    def test_each_generation_continues_with_the_best_network_on_the_official_table(self):
+        incumbent = Network(np.random.default_rng(7))
+        incumbent.biases[-1][0] = 0
+        official_blocks = Simulation().blocks
+        scores = {0: (40, 30), 1: (48, 40), 2: (44, 20), 3: (48, 30), 4: (46, 10), 5: (48, 30), 6: (42, 15)}
+        versions = iter(range(1, 7))
+        evaluated_weights = []
+        training_weights = []
+        candidate_parents = []
+        targets = []
+        recorded_winners = []
+        recorded_exploration = []
+
+        def play(simulation, *, policy, record_frames=True):
+            self.assertEqual(simulation.blocks, official_blocks)
+            version = int(policy.network.biases[-1][0])
+            if policy.rng is not None:
+                if record_frames:
+                    recorded_exploration.append(version)
+                    return {"score": 64, "duree": 13}
+                training_weights.append(version)
+                policy.history.append((np.zeros(LAYERS[0]), 0))
+                return {"score": 64 if len(training_weights) in (2, 4) else 60,
+                        "duree": 13 if len(training_weights) == 4 else 15}
+            (recorded_winners if record_frames else evaluated_weights).append(version)
+            score, duration = scores[version]
+            return {"score": score, "duree": duration}
+
+        def update(network, _rows, rewards, _rng, *, learning_rate):
+            targets.extend(rewards)
+            candidate_parents.append(int(network.biases[-1][0]))
+            network.biases[-1][0] = next(versions)
+
+        with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
+              patch("src.reseau.os.process_cpu_count", return_value=2, create=True),
+              patch("src.reseau.ProcessPoolExecutor") as pool):
+            pool.return_value.__enter__.return_value.map = map
+            best, winner, trained, explored = train_matches(6, 7, incumbent, resume=True)
+        pool.assert_called_once_with(max_workers=2)
+        self.assertEqual(training_weights, [0, 0, 1, 1, 3, 3])
+        self.assertEqual(candidate_parents, training_weights)
+        self.assertEqual(best.biases[-1][0], 3)
+        self.assertEqual(incumbent.biases[-1][0], 0)
+        self.assertEqual((winner["score"], winner["duree"]), (48, 30))
+        self.assertIs(trained, winner)
+        self.assertEqual((explored["score"], explored["duree"], explored["match"]), (64, 13, 4))
+        self.assertEqual(evaluated_weights, list(range(7)))
+        self.assertEqual(recorded_winners, [3])
+        self.assertEqual(recorded_exploration, [1])
+        lower = (60 + 0.5 * (1 - 15 / MATCH_SECONDS)) / 8
+        high = (64 + 0.5 * (1 - 15 / MATCH_SECONDS)) / 8
+        faster = (64 + 0.5 * (1 - 13 / MATCH_SECONDS)) / 8
+        np.testing.assert_allclose(targets, [high, high, lower, faster, high, lower, faster, lower,
+                                             lower, high, lower, faster, lower, lower, lower])
+
+    def test_training_targets_favor_a_point_scored_late_over_finishing_early(self):
+        incumbent = Network(np.random.default_rng(7))
+        targets = []
+        exploration_scores = iter(((40, 1), (41, 99)))
+
+        def play(_simulation, *, policy, record_frames=True):
+            if policy.rng is None:
+                return {"score": 41, "duree": 99}
+            if record_frames:
+                return {"score": 41, "duree": 99}
+            score, duration = next(exploration_scores)
+            policy.history.append((np.zeros(LAYERS[0]), 0))
+            if score == 41:
+                policy.history.extend((np.zeros(LAYERS[0]), 0) for _ in range(4))
+                policy.history.append((np.zeros(LAYERS[0]), 8))
+            return {"score": score, "duree": duration}
+
+        def update(_network, _rows, rewards, _rng, *, learning_rate):
+            targets.append(rewards)
+
+        with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
+              patch("src.reseau.os.process_cpu_count", return_value=2, create=True),
+              patch("src.reseau.ProcessPoolExecutor") as pool):
+            pool.return_value.__enter__.return_value.map = map
+            train_matches(2, 7, incumbent, resume=True)
+        np.testing.assert_array_equal(targets[0][:5], [targets[0][0]] * 5)
+        self.assertAlmostEqual(float(targets[0][0] - targets[0][-1]), 1)
+        self.assertGreater(targets[0][0], targets[1][-1])
+
+    def test_validates_initial_weights_even_when_training_records_no_decisions(self):
+        incumbent = Network(np.random.default_rng(7))
+
+        def play(_simulation, *, policy, record_frames=True):
+            if policy.rng is not None:
+                return {"score": 64, "duree": 12}
+            return {"score": 32 if policy.network is incumbent else 40, "duree": 25}
+
+        with patch("src.reseau.play_match", side_effect=play):
+            best, winner, trained, explored = train_matches(1, 7, incumbent)
+        self.assertIsNot(best, incumbent)
+        self.assertEqual(winner["score"], 40)
+        self.assertIs(trained, winner)
+        self.assertEqual(explored["score"], 64)
+
+    def test_training_prints_and_saves_the_session_replays_even_when_existing_weights_win(self):
+        incumbent = Network(np.random.default_rng(7))
+
+        def play(_simulation, *, policy, record_frames=True):
+            if policy.rng is not None:
+                duration = 22.85
+            else:
+                duration = 19.96 if policy.network is incumbent else 24.31
+            return {"score": 50, "duree": duration, "frames": [duration] if record_frames else []}
+
+        with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "load", return_value=incumbent),
+              patch.object(Network, "save") as save_model, patch("src.reseau.completion_beep"),
+              patch("src.reseau.save_replay", side_effect=[(51, "51.json"), (52, "52.json"), (53, "53.json")]) as save,
+              patch("sys.argv", ["reseau", "--model", "reseau.npz", "train", "--matches", "1", "--mutate-deposits"]),
+              patch("builtins.print") as output):
+            from src.reseau import main
+
+            main()
+        self.assertEqual([call.args[0]["frames"] for call in save.call_args_list], [[22.85], [24.31], [19.96]])
+        save_model.assert_called_once_with(Path("reseau.npz"))
+        for number in range(51, 54):
+            output.assert_any_call(f"python -B -m src.match replay {number}")
+
+    def test_resume_explores_alternatives_among_the_five_best_choices(self):
+        class RankedNetwork:
+            def predict(self, rows):
+                return np.arange(len(rows))
+
+        simulation = Simulation()
+        choices = [(1, pile, 1) for pile in range(6)]
+        expected = list(reversed(choices))
+        policy = MatchPolicy(RankedNetwork(), rng=np.random.default_rng(7), resume=True)
+        first_choices = []
+        for _ in range(100):
+            ordered = policy.order(simulation, {}, choices, pickup=True)
+            self.assertCountEqual(ordered, choices)
+            first_choices.append(ordered[0])
+        self.assertEqual(set(first_choices), set(expected[:5]))
+        self.assertIn(first_choices.count(expected[0]), range(60, 81))
+
+    def test_resume_explores_the_fastest_other_pile_while_loaded(self):
+        class RankedNetwork:
+            def predict(self, rows):
+                return np.arange(len(rows))
+
+        simulation = Simulation()
+        choices = [(1 + pile / 10, pile, 1) for pile in range(8)]
+        policy = MatchPolicy(RankedNetwork(), rng=np.random.default_rng(7), resume=True)
+        first_choices = [policy.order(simulation, {2: 9}, choices, pickup=True)[0] for _ in range(100)]
+        self.assertEqual(set(first_choices), {choices[index] for index in (0, 4, 5, 6, 7)})
+
+    def test_replay_rank_prefers_score_then_total_duration(self):
+        short = {"score": 40, "duree": 38}
+        long = {"score": 40, "duree": 72}
+        lower = {"score": 32, "duree": 15}
+        self.assertGreater(_replay_rank(short), _replay_rank(long))
+        self.assertGreater(_replay_rank(long), _replay_rank(lower))
+
+    def test_network_can_finish_even_with_a_pickup_available(self):
+        class FinishFirst:
+            def predict(self, rows):
+                return np.where(rows[:, 79] == -1, 1, 0)
+
+        simulation = two_pile_simulation()
+        result = play_match(simulation, policy=MatchPolicy(FinishFirst()))
+        self.assertEqual(result["duree"], 0)
+        self.assertEqual(result["score"], 10)
+        replay = Replay(result)
+        self.assertEqual(replay.duration, 0)
+        self.assertEqual(replay.frame["score"], 10)
+
+    def test_network_can_switch_to_deposits_with_one_pile_loaded(self):
+        class StopAfterOne:
+            def predict(self, rows):
+                return np.where(rows[:, 79] == -1, np.where(rows[:, 6] > 0, 1, -1), 0)
+
+        replay = play_match(two_pile_simulation(), policy=MatchPolicy(StopAfterOne()))
+        actions = [frame["action"] for frame in replay["frames"]
+                   if frame["action"].startswith(("Pile ", "Dépôt "))]
+        self.assertEqual([action.split()[0] for action in actions], ["Pile", "Dépôt", "Pile", "Dépôt"])
+
+    def test_network_can_choose_the_opposite_approach_to_a_centered_deposit(self):
+        class PreferOppositeApproach:
+            def predict(self, rows):
+                pickup = -abs(rows[:, 90] - 105 / 380)
+                deposit = -rows[:, 87] - 20 * (abs(rows[:, 86] - 0.2) + abs(rows[:, 85] - 1 / 12))
+                return np.select((rows[:, 79] == 1, rows[:, 79] == 0), (pickup, deposit), default=-2)
+
+        replay = play_match(Simulation(blocks=START_BLOCKS[:1]), policy=MatchPolicy(PreferOppositeApproach()))
+        deposit = next(frame for frame in replay["frames"] if frame["action"].startswith("Dépôt "))
+        self.assertEqual(sum(x for x, _ in deposit["piles"][0]) / 4, 250)
+        self.assertLess(deposit["position"][1], 400)
+        self.assertEqual(replay["score"], 18)
+
+    def test_replay_rejects_invalid_demonstration_actions(self):
+        demonstration = play_match(Simulation(blocks=()))
+        demonstration.update(prises=[[1, 2]], depots=[[2, -1, 0]])
+        with self.assertRaisesRegex(ValueError, "Dépôt de démonstration invalide"):
+            _replay_examples(demonstration)
+
+    def test_demonstration_can_resume_loading_after_a_deposit(self):
+        actions = {"prises": [[1, 2], [9, 3]], "depots": [[2, 1, 0], [3, 3, 180]], "tournees": [1, 1]}
+        replay = play_match(Simulation(), policy=_ReplayDemonstration(actions))
+        examples = _replay_examples({**replay, **actions})
+        self.assertEqual([row[index, 79] for row, index in examples], [1, -1, 0, 1, -1, 0, -1])
+        self.assertEqual(replay["score"], 26)
+
+    def test_shifted_and_rotated_deposit_scores_and_can_be_replayed_from_saved_pose(self):
+        offsets = ((60, 0), *CENTERED_OFFSETS[1:])
+        angles = (radians(30), *ALIGNED_ANGLES[1:])
+        actions = {"prises": [[1, 2]], "depots": [[2, 1, 0]],
+                   "decalages_depot_mm": offsets, "rotations_depot_rad": angles}
+        replay = play_match(Simulation(), policy=_ReplayDemonstration(actions))
+        deposit = next(frame for frame in replay["frames"] if frame["action"].startswith("Dépôt "))
+        pile = [Vec2d(*corner) for corner in deposit["piles"][0]]
+        center = sum(pile, Vec2d(0, 0)) / 4
+        self.assertLess(center.get_distance((310, 400)), 0.001)
+        edge = max((b - a for a, b in zip(pile, pile[1:] + pile[:1])), key=lambda side: side.length)
+        self.assertAlmostEqual(remainder(edge.angle - angles[0], pi), 0, places=5)
+        self.assertEqual(deposit["score"], 8)
+        self.assertEqual(replay["decalages_depot_mm"], offsets)
+        self.assertEqual(replay["rotations_depot_rad"], angles)
+        examples = _replay_examples(json.loads(json.dumps({**actions, **replay})))
+        self.assertEqual([rows[index, 79] for rows, index in examples], [1, -1, 0, -1])
+
+        network = Network(np.random.default_rng(7))
+        network.drop_offsets = offsets
+        network.drop_angles = angles
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
+            path = Path(directory) / "reseau.npz"
+            network.save(path)
+            loaded = Network.load(path)
+            self.assertEqual(loaded.drop_offsets, offsets)
+            self.assertEqual(loaded.drop_angles, angles)
+            np.savez(path, *network.weights, *network.biases, drop_offsets=np.asarray(offsets))
+            legacy = Network.load(path)
+            self.assertEqual(legacy.drop_offsets, offsets)
+            self.assertEqual(legacy.drop_angles, ALIGNED_ANGLES)
+
+    def test_imitation_ranks_the_demonstrated_action_above_alternatives(self):
+        simulation = two_pile_simulation()
+        choices = [(1, 0, 1), (1, 1, 2)]
+        rows = features(simulation, {}, [*choices, None], pickup=True)
+        network = Network(np.random.default_rng(7))
+        expected = int(np.argmin(network.predict(rows)[:2]))
+        network.imitate([(rows, expected)], steps=64, learning_rate=0.05)
+        self.assertEqual(MatchPolicy(network).order(simulation, {}, choices, pickup=True, can_finish=True)[0],
+                         choices[expected])
+
+    def test_features_distinguish_stock_held_piles_and_occupied_walls(self):
+        sim = Simulation(blocks=(START_BLOCKS[0], START_BLOCKS[1], (90, 345, 410, 455), (1050, 945, 1370, 1055)))
+        row = features(sim, {1: 1}, [None], pickup=True)[0]
+        np.testing.assert_array_equal(row[11:39:7], [1, 0, 0, 0])
+        np.testing.assert_array_equal(row[12:40:7], [0, 1, 0, 0])
+        np.testing.assert_array_equal(row[13:41:7], [0, 0, 1, 0])
+        self.assertAlmostEqual(row[78], 1 / 5)
+        np.testing.assert_array_equal(row[80:], 0)
+
+    def test_action_distance_uses_the_planned_segments_for_pickup_and_deposit(self):
+        sim = reference_simulation(((800, 700, 950, 1300),), blocks=((1445, 840, 1555, 1160),))
+        state = _action_state(sim)
+        plan = _pickup_approach(sim, sim.blocks[0], 1, state)
+        path = (state[0], *plan.approach.before, *plan.approach.after, plan.end)
+        expected = sum(dist(a, b) for a, b in zip(path, path[1:]))
+        self.assertGreater(expected, dist(path[0], path[-1]) + 100)
+        row = features(sim, {}, [(plan.duration, 0, 1)], pickup=True, pickup_plans={(0, 1): plan})[0]
+        self.assertAlmostEqual(row[ACTION_DISTANCE], expected / TABLE_DIAGONAL)
+        self.assertTrue(take_pile(sim, pile=0, cup=1))
+        site = Vec2d(250, 400)
+        state = _action_state(sim)
+        plan = _drop_approach(sim.blocks[0], site, 0, state)
+        path = (state[0], *plan.before, *plan.after)
+        expected = sum(dist(a, b) for a, b in zip(path, path[1:]))
+        rows = features(sim, {1: 0}, [(8, 1, 1, site, 0), (0, 1, 1, Vec2d(1500, 1000), 0)], pickup=False)
+        self.assertAlmostEqual(rows[0, ACTION_DISTANCE], expected / TABLE_DIAGONAL)
+        self.assertEqual(rows[1, ACTION_DISTANCE], -1)
+
+    def test_loading_96_input_weights_preserves_predictions_on_the_official_table(self):
+        rng = np.random.default_rng(7)
+        network = Network(rng)
+        old_weights = np.delete(network.weights[0], ACTION_DISTANCE, axis=0)
+        current = rng.random((3, LAYERS[0]), dtype=np.float32)
+        old = np.delete(current, ACTION_DISTANCE, axis=1)
+        old[:, 11:77:7] = 1
+        old[:, 78] /= 2
+        hidden = np.maximum(old @ old_weights + network.biases[0], 0)
+        hidden = np.maximum(hidden @ network.weights[1] + network.biases[1], 0)
+        expected = (hidden @ network.weights[2] + network.biases[2])[:, 0]
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
+            path = Path(directory) / "reseau.npz"
+            np.savez(path, old_weights, *network.weights[1:], *network.biases)
+            migrated = Network.load(path)
+        np.testing.assert_allclose(migrated.predict(current), expected, atol=1e-6)
+        np.testing.assert_array_equal(migrated.weights[0][ACTION_DISTANCE], 0)
 
 
 class SimulationTest(unittest.TestCase):
     def test_translation_holonome_and_time(self):
         sim = reference_simulation()
-        sim.move_to(250, 2000 - SIDE / 2)
+        sim.move_to(250, 2000)
         sim.advance(0.5)
-        self.assertAlmostEqual(dist(sim.position, (250, 1500)), 0)
+        self.assertAlmostEqual(sim.position[1], 1125, delta=1)
         sim.advance(0.5)
-        self.assertEqual(sim.position, (250, 2000 - SIDE / 2))
+        self.assertAlmostEqual(sim.position[1], 1500, delta=10)
+        sim.advance(0.5)
+        self.assertTrue(sim.moving)
+        self.assertLess(sim.position[1], 2000 - SIDE / 2)
+        sim.advance(0.5)
+        self.assertAlmostEqual(sim.position[1], 2000 - SIDE / 2, places=5)
         self.assertFalse(sim.moving)
         for i, vertex in enumerate(FOOTPRINT):
             self.assertAlmostEqual(dist(FOOTPRINT[i - 1], vertex), SIDE)
+
+    def test_turn_by_preserves_the_destination_while_rolling(self):
+        sim = reference_simulation(blocks=())
+        sim.move_to(1250, 1000)
+        sim.turn_by(radians(90))
+        sim.advance(0.125)
+        self.assertAlmostEqual(sim.position[0], 250 + 1000 * 0.125**2 / 2, delta=0.2)
+        self.assertAlmostEqual(sim.heading, radians(45))
+        self.assertTrue(sim.moving)
+        sim.advance(1.875)
+        self.assertEqual(sim.position, (1250, 1000))
+        self.assertAlmostEqual(sim.heading, radians(90))
+        self.assertFalse(sim.moving)
+
+    def test_rolling_turn_updates_the_clearance_to_walls(self):
+        for wall in ((), ((0, 0, 3000, 100),)):
+            with self.subTest(wall=wall):
+                sim = reference_simulation(wall, blocks=())
+                sim.move_to(250, 0)
+                sim.turn_by(radians(90))
+                sim.advance(2)
+                self.assertTrue(sim.movement.blocked)
+                self.assertFalse(sim.moving)
+                self.assertAlmostEqual(sim.heading, radians(90))
+                edge = 100 if wall else 0
+                self.assertAlmostEqual(min(sim.position[1] + y for _, y in sim.footprint), edge, places=5)
+
+    def test_rolling_turn_can_be_blocked_after_reaching_the_destination(self):
+        sim = reference_simulation(blocks=())
+        sim.move_to(250, 190)
+        sim.advance(2)
+
+        sim.move_to(850, 190)
+        sim.turn_by(radians(-15))
+        sim.advance(2)
+
+        self.assertEqual(sim.position, (850, 190))
+        self.assertEqual(sim.heading, 0)
+        self.assertFalse(sim.moving)
+        self.assertFalse(sim.movement.blocked)
+        self.assertTrue(sim.movement.rotation_blocked)
+
+        sim.move_to(950, 190)
+        sim.advance(1)
+        self.assertFalse(sim.movement.rotation_blocked)
 
     def test_entire_triangle_stays_inside_table_and_can_leave_the_border(self):
         sim = reference_simulation(blocks=())
@@ -78,7 +534,7 @@ class SimulationTest(unittest.TestCase):
         sim.move_to(1250, 1000)
         sim.advance(0.5)
         sim.move_to(750, 500)
-        sim.advance(0.5)
+        sim.advance(2)
         self.assertEqual(sim.position, (750, 500))
         sim.reset()
         self.assertEqual(sim.position, START)
@@ -100,7 +556,7 @@ class SimulationTest(unittest.TestCase):
         sim = reference_simulation()
         sim.turn_by(radians(-37.5))
         sim.move_to(250, 219)
-        sim.advance(1)
+        sim.advance(2)
         self.assertFalse(sim.movement.blocked)
         sim.turn_by(TURN_STEP)
         self.assertTrue(sim.movement.blocked)
@@ -147,7 +603,7 @@ class SimulationTest(unittest.TestCase):
         sim.move_to(1250, 1000)
         sim.advance(0.25)
         self.assertEqual(sim.blocks, (initial,))
-        sim.advance(0.35)
+        sim.advance(1)
         pushed, = sim.blocks
         self.assertGreater(pushed.position[0], initial.position[0] + 100)
         self.assertAlmostEqual(pushed.angle, 0, delta=radians(1))
@@ -189,7 +645,7 @@ class SimulationTest(unittest.TestCase):
         sim = reference_simulation()
         initial = sim.blocks[0]
         sim.move_to(750, 1000)
-        sim.advance(1)
+        sim.advance(2)
         sim.move_to(750, 0)
         sim.advance(10)
         self.assertTrue(sim.movement.blocked)
@@ -204,9 +660,9 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(len(initial), 10)
         self.assertAlmostEqual(initial[8].angle, radians(90))
         sim.move_to(1500, 1000)
-        sim.advance(1.25)
+        sim.advance(2.3)
         sim.move_to(1500, 0)
-        sim.advance(0.4)
+        sim.advance(0.85)
         self.assertTrue(sim.moving)
         self.assertNotEqual(sim.blocks, initial)
 
@@ -225,7 +681,7 @@ class SimulationTest(unittest.TestCase):
                 sim.turn_by(radians(heading))
                 sim.toggle_suction(number)
                 sim.move_to(900, 1000)
-                sim.advance(1)
+                sim.advance(2)
                 self.assertEqual([cup.enabled for cup in sim.suction_cups], [n == number for n in (1, 2, 3)])
                 pile, = sim.blocks
                 x, y = sim.position
@@ -243,42 +699,114 @@ class SimulationTest(unittest.TestCase):
                 self.assertAlmostEqual(dist(sim.blocks[0].position, carried.position), 0)
 
     def test_drops_the_second_pile_in_zone_and_leaves_with_the_first(self):
-        robot = RobotGeometry(FOOTPRINT, (
-            ((FRONT, -100), Vec2d(1, 0)),
-            ((FRONT, 100), Vec2d(1, 0)),
-        ))
-        sim = Simulation(blocks=((1445, 440, 1555, 760), (1445, 1040, 1555, 1360)), robot=robot)
-        pickup_x = 1445 - FRONT - 2
-
-        sim.move_to(250, 800)
-        sim.advance(1)
-        sim.move_to(pickup_x, 800)
-        sim.advance(2)
-        sim.toggle_suction(1)
+        sim = two_pile_simulation()
+        self.assertTrue(take_pile(sim, pile=0, cup=1))
         self.assertEqual(sim.held_pile(1), 0)
-
-        sim.move_to(pickup_x, 1000)
-        sim.advance(1)
-        sim.toggle_suction(2)
+        self.assertFalse(take_pile(sim, pile=1, cup=1))
+        self.assertTrue(take_pile(sim, pile=1, cup=2))
         self.assertEqual((sim.held_pile(1), sim.held_pile(2)), (0, 1))
+        self.assertAlmostEqual(abs(sim.blocks[0].position[1] - sim.blocks[1].position[1]), 330)
 
-        # Place le centre de la seconde pile dans le rempart, avec les deux piles encore tenues.
-        sim.move_to(pickup_x - (1500 - 850), 1000)
-        sim.advance(1)
-        self.assertAlmostEqual(dist(sim.blocks[1].position, (850, 1200)), 0)
-        self.assertEqual(sim.score, 0)
-        sim.toggle_suction(2)
+        before = sim.position, sim.heading, sim.time, sim.blocks
+        self.assertFalse(place_pile(sim, cup=2, x=1600, y=1200, angle=radians(90)))
+        self.assertEqual((sim.position, sim.heading, sim.time, sim.blocks), before)
+        for x, y in TOWER_CENTERS:
+            self.assertFalse(place_pile(sim, cup=2, x=x, y=y, angle=0))
+            self.assertEqual((sim.position, sim.heading, sim.time, sim.blocks), before)
+        release = []
+        self.assertTrue(place_pile(sim, cup=2, x=850, y=1000, angle=radians(90),
+                                   on_release=lambda: release.append(sim.position)))
+        self.assertAlmostEqual(dist(sim.position, release[0]), 50)
+        self.assertAlmostEqual(dist(sim.blocks[1].position, (850, 1000)), 0)
+        self.assertAlmostEqual(sim.blocks[1].angle, radians(90))
         self.assertEqual((sim.held_pile(1), sim.held_pile(2)), (0, None))
         self.assertEqual(sim.score, 8)
 
         first_offset = Vec2d(*sim.blocks[0].position) - Vec2d(*sim.position)
         deposited = sim.blocks[1]
-        sim.move_to(*START)
-        sim.advance(1)
-        self.assertEqual(sim.position, START)
+        exit_position = (sim.position[0] - 250, sim.position[1])
+        sim.move_to(*exit_position)
+        sim.advance(1.1)
+        self.assertEqual(sim.position, exit_position)
         self.assertEqual((sim.held_pile(1), sim.held_pile(2)), (0, None))
-        self.assertAlmostEqual(dist(sim.blocks[0].position, Vec2d(*START) + first_offset), 0)
+        self.assertAlmostEqual(dist(sim.blocks[0].position, Vec2d(*exit_position) + first_offset), 0)
         self.assertEqual(sim.blocks[1], deposited)
+        self.assertEqual(sim.score, 8)
+
+    def test_can_back_away_from_the_table_border_with_a_pile_and_drop_it(self):
+        sim = reference_simulation()
+        self.assertTrue(take_pile(sim, pile=4, cup=2))
+        pile = sim.blocks[4]
+        cup_x, _ = sim.suction_cups[1].position
+        self.assertAlmostEqual(cup_x, pile.position[0])
+        self.assertAlmostEqual(max(y for _, y in pile.corners), 2000)
+
+        initial_y = sim.position[1]
+        self.assertTrue(place_pile(sim, cup=2, x=675, y=1425, angle=-pi / 4))
+        self.assertLess(sim.position[1], initial_y)
+        self.assertIsNone(sim.held_pile(2))
+        self.assertAlmostEqual(dist(sim.blocks[4].position, (675, 1425)), 0)
+        self.assertEqual(sim.score, 8)
+
+    def test_pickup_starts_at_25_mm_and_advances_up_to_50_mm(self):
+        wall = ((1565, 750, 1600, 1250),)
+        for right, obstacles, shift in ((1555, (), 27), (3000, (), 0), (2990, (), 10), (1555, wall, 10)):
+            with self.subTest(right_edge=right, obstacles=obstacles):
+                sim = reference_simulation(obstacles, blocks=((right - 110, 840, right, 1160),))
+                initial = sim.blocks[0].position
+                trace = []
+
+                def advance(seconds):
+                    sim.advance(seconds)
+                    trace.append((sim.suction_cups[0].position, sim.held_pile(1)))
+
+                self.assertTrue(take_pile(sim, pile=0, cup=1, advance=advance))
+                standoff_x = right - 110 - 25
+                self.assertTrue(any(abs(point[0] - standoff_x) < 1e-6 and held is None for point, held in trace))
+                self.assertEqual(sim.held_pile(1), 0)
+                self.assertAlmostEqual(sim.suction_cups[0].position[0] - standoff_x, 23 + shift, places=5)
+                self.assertAlmostEqual(sim.blocks[0].position[0] - initial[0], shift, places=5)
+                boundary = obstacles[0][0] if obstacles else 3000
+                self.assertLessEqual(max(x for x, _ in sim.blocks[0].corners), boundary + 1e-6)
+
+    def test_deposit_can_move_diagonally_away_before_taking_the_left_corridor(self):
+        robot = RobotGeometry(FOOTPRINT, (
+            ((FRONT, -100), Vec2d(1, 0)),
+            ((-FRONT / 2, 95), Vec2d(1, 0).rotated(radians(120))),
+            ((-FRONT / 2, -95), Vec2d(1, 0).rotated(radians(-120))),
+            ((FRONT, 100), Vec2d(1, 0)),
+        ))
+        sim = Simulation(robot=robot)
+        self.assertTrue(take_pile(sim, pile=8, cup=1))
+        self.assertTrue(take_pile(sim, pile=9, cup=2))
+        self.assertTrue(place_pile(sim, cup=2, x=675, y=575, angle=pi / 4))
+        self.assertTrue(place_pile(sim, cup=1, x=850, y=1000, angle=pi / 2))
+        self.assertTrue(take_pile(sim, pile=4, cup=2))
+        self.assertTrue(take_pile(sim, pile=1, cup=4))
+        self.assertTrue(place_pile(sim, cup=4, x=675, y=1425, angle=-pi / 4))
+
+        self.assertTrue(place_pile(sim, cup=2, x=250, y=400, angle=0))
+        self.assertAlmostEqual(dist(sim.blocks[4].position, (250, 400)), 0)
+        self.assertEqual(sim.score, 32)
+
+    def test_separate_actions_check_the_route_before_touching_the_load(self):
+        wall = (900, 0, 950, 2000)
+        sim = reference_simulation((wall,), blocks=((650, 900, 760, 1220), (1445, 340, 1555, 660)))
+        self.assertTrue(take_pile(sim, pile=0, cup=1))
+        before = sim.position, sim.heading, sim.time, sim.blocks
+        self.assertFalse(take_pile(sim, pile=1, cup=2))
+        self.assertEqual((sim.position, sim.heading, sim.time, sim.blocks), before)
+        self.assertFalse(place_pile(sim, cup=1, x=1040, y=1000, angle=radians(90)))
+        self.assertEqual((sim.position, sim.heading, sim.time, sim.blocks), before)
+        self.assertEqual(sim.held_pile(1), 0)
+
+    def test_separate_deposit_turns_the_robot_to_place_the_pile_at_the_requested_angle(self):
+        sim = reference_simulation(blocks=((1445, 340, 1555, 660),))
+        self.assertTrue(take_pile(sim, pile=0, cup=1))
+        self.assertTrue(place_pile(sim, cup=1, x=850, y=1000, angle=0))
+        self.assertIsNone(sim.held_pile(1))
+        self.assertAlmostEqual(dist(sim.blocks[0].position, (850, 1000)), 0)
+        self.assertAlmostEqual(sim.blocks[0].angle, 0)
         self.assertEqual(sim.score, 8)
 
     def test_cup_does_not_grab_the_short_side(self):
@@ -367,17 +895,125 @@ class SimulationTest(unittest.TestCase):
         sim = reference_simulation(blocks=((650, 900, 760, 1220),))
         sim.toggle_suction(1)
         sim.move_to(900, 1000)
-        sim.advance(1)
+        sim.advance(2)
         sim.turn_by(radians(-80))
         x, y = sim.position
         px, py = sim.blocks[0].position
         sim.move_to(480 + x - px, 240 + y - py)
-        sim.advance(1)
+        sim.advance(2.5)
         sim.toggle_suction(1)
         self.assertEqual(sim.score, 3)
 
 
 class AutomaticMatchTest(unittest.TestCase):
+    def test_planned_rolling_turn_uses_the_clearance_in_the_requested_direction(self):
+        for edge in (0, 100):
+            with self.subTest(edge=edge):
+                wall = ((0, 0, 3000, edge),) if edge else ()
+                sim = reference_simulation(wall, blocks=())
+                sim.move_to(250, edge + 200)
+                sim.advance(2)
+                start, footprints, obstacles = _action_state(sim)
+                end = Vec2d(850, edge + 200)
+                angle = radians(15)
+
+                plan = _approach(start, end, angle, footprints, obstacles)
+                self.assertIsNotNone(plan)
+                self.assertTrue(plan.rolling)
+                self.assertIsNone(_approach(start, end, -angle, footprints, obstacles))
+                self.assertTrue(_follow(sim, plan))
+                self.assertEqual(sim.position, tuple(end))
+                self.assertAlmostEqual(sim.heading, angle)
+
+    def test_planned_rolling_turn_checks_intermediate_angles(self):
+        sim = reference_simulation(blocks=())
+        sim.turn_by(radians(75))
+        sim.move_to(250, 215)
+        sim.advance(2)
+        start, footprints, obstacles = _action_state(sim)
+        end = Vec2d(850, 215)
+
+        plan = _approach(start, end, radians(30), footprints, obstacles)
+        self.assertIsNotNone(plan)
+        self.assertFalse(plan.rolling)
+        self.assertTrue(_follow(sim, plan))
+        self.assertEqual(sim.position, tuple(end))
+        self.assertAlmostEqual(sim.heading, radians(105))
+
+    def test_route_uses_multiple_passages_and_skips_unnecessary_waypoints(self):
+        start, end = Vec2d(300, 1000), Vec2d(2700, 1000)
+        footprints = (rectangle_corners((-20, -20, 20, 20)),)
+        rectangles = ((800, 0, 950, 1350), (1650, 650, 1800, 2000))
+        obstacles = tuple((rectangle_corners(bounds), bounds) for bounds in rectangles)
+        path, duration = _route(start, end, footprints, obstacles)
+        nodes = (start, *path)
+        self.assertEqual(nodes[-1], end)
+        self.assertEqual(len(path), 3)
+        self.assertTrue(all(_clear(a, b, footprints, obstacles) for a, b in zip(nodes, nodes[1:])))
+        self.assertTrue(all(not _clear(a, b, footprints, obstacles) for a, b in zip(nodes, nodes[2:])))
+        self.assertAlmostEqual(duration, sum(travel_time(a.get_distance(b)) for a, b in zip(nodes, nodes[1:])))
+        self.assertEqual(_route(start, end, footprints, obstacles, duration - 0.01), ((), 0))
+        self.assertEqual(_route(start, end, footprints, ())[0], (end,))
+
+    def test_official_table_deposits_both_piles_carried_on_the_front_face(self):
+        simulation = Simulation()
+        self.assertTrue(take_pile(simulation, pile=8, cup=1))
+        self.assertTrue(take_pile(simulation, pile=9, cup=4))
+        self.assertTrue(place_pile(simulation, cup=1, x=250, y=400, angle=0))
+        self.assertEqual(simulation.held_pile(4), 9)
+        self.assertTrue(place_pile(simulation, cup=4, x=850, y=1000, angle=pi / 2))
+        self.assertEqual(simulation.score, 16)
+
+    def test_strategy_can_fill_all_four_cups(self):
+        blocks = tuple(START_BLOCKS[i] for i in (0, 4, 6, 8))
+        replay = play_match(Simulation(blocks=blocks), batches=True)
+        self.assertEqual(max(sum(enabled for _, enabled in frame["cups"]) for frame in replay["frames"]), 4)
+
+    def test_centered_strategy_limits_loading_to_remaining_walls(self):
+        occupied = ((90, 345, 410, 455), (90, 1545, 410, 1655), (795, 840, 905, 1160))
+        simulation = Simulation(blocks=START_BLOCKS[:5] + occupied)
+        rows = features(simulation, {}, [(1, 0, 1)], pickup=True)
+        self.assertAlmostEqual(rows[0, 78], 0.6)
+        replay = play_match(simulation, batches=True)
+        self.assertEqual(max(sum(enabled for _, enabled in frame["cups"]) for frame in replay["frames"]), 2)
+
+    def test_network_learns_and_reloads_its_action_values(self):
+        rng = np.random.default_rng(7)
+        rows = features(two_pile_simulation(), {}, [(1, 0, 1), (1, 1, 2)], pickup=True)
+        self.assertEqual(rows.shape, (2, 97))
+        network = Network(rng)
+        targets = np.array([1.0, 0.0], dtype=np.float32)
+        initial_error = np.mean((network.predict(rows) - targets) ** 2)
+        network.train(rows, targets, rng)
+        self.assertLess(np.mean((network.predict(rows) - targets) ** 2), initial_error)
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            path = Path(folder) / "reseau.npz"
+            network.save(path)
+            np.testing.assert_array_equal(Network.load(path).predict(rows), network.predict(rows))
+
+    def test_strategy_loads_two_piles_before_scoring_with_separate_deposits(self):
+        replay = Replay(play_match(two_pile_simulation(), batches=True))
+
+        def state(frame):
+            return sum(enabled for _, enabled in frame["cups"]), frame["score"]
+
+        self.assertEqual([value for value, _ in groupby(replay.frames[:-1], state)],
+                         [(0, 0), (1, 0), (2, 0), (1, 8), (0, 16)])
+        deposits = [frame for frame in replay.frames if frame["action"].startswith("Dépôt ")]
+        self.assertEqual(list(map(state, deposits)), [(1, 8), (0, 16)])
+        angles = {tuple(round(value) for value in (Vec2d(*a) + Vec2d(*c)) / 2):
+                  (Vec2d(*b) - Vec2d(*a)).angle for a, b, c, _ in WALL_ZONES}
+        for frame in deposits:
+            pile = frame["piles"][int(frame["action"].split()[2]) - 1]
+            center = tuple(sum(axis) / 4 for axis in zip(*pile))
+            expected = tuple(map(round, center))
+            self.assertIn(expected, angles)
+            self.assertLess(dist(center, expected), 0.001)
+            edge = max((Vec2d(*b) - Vec2d(*a) for a, b in zip(pile, pile[1:] + pile[:1])),
+                       key=lambda side: side.length)
+            self.assertAlmostEqual(remainder(edge.angle - angles[expected], pi), 0, places=5)
+        self.assertLess(replay.duration, MATCH_SECONDS)
+
     def test_interrupted_save_leaves_only_the_previous_replay(self):
         def interrupt_write(_replay, file, **_options):
             file.write('{"frames":')
@@ -393,7 +1029,7 @@ class AutomaticMatchTest(unittest.TestCase):
                 with self.assertRaises(KeyboardInterrupt):
                     save_replay(replay, directory)
             self.assertEqual(list(directory.iterdir()), [first])
-            self.assertEqual(Replay(json.loads(first.read_text(encoding="utf-8"))).duration, MATCH_SECONDS)
+            self.assertEqual(Replay(json.loads(first.read_text(encoding="utf-8"))).duration, replay["duree"])
             self.assertEqual(save_replay(replay, directory)[0], 2)
 
     def test_replay_starts_at_first_timestamp(self):
@@ -405,10 +1041,31 @@ class AutomaticMatchTest(unittest.TestCase):
         replay.time = 0
         self.assertEqual(replay.frame["t"], 5)
 
+    def test_return_bonus_at_the_buzzer_depends_on_the_chassis_overlap(self):
+        for x, bonus in ((START[0], 10), (650, 5), (850, 0)):
+            with self.subTest(x=x):
+                simulation = reference_simulation(blocks=())
+                simulation.move_to(x, START[1])
+                simulation.advance(MATCH_SECONDS)
+                result = play_match(simulation, record_frames=False)
+                self.assertEqual(result["score_retour"], bonus)
+                self.assertEqual(result["score"], bonus)
+
+    def test_return_goes_around_a_blocked_entrance(self):
+        simulation = reference_simulation(((490, 750, 510, 1250),), blocks=())
+        for target in ((250, 550), (1050, 550), (1050, 950)):
+            simulation.move_to(*target)
+            simulation.advance(2)
+        self.assertEqual(simulation.position, (1050, 950))
+        result = play_match(simulation, batches=True)
+        self.assertEqual(result["score_retour"], 10)
+        self.assertTrue(any(frame["position"][1] < 750 or frame["position"][1] > 1250
+                            for frame in result["frames"] if frame["action"].startswith("Retour")))
+
     def test_replay_rejects_a_later_frame_with_a_missing_field(self):
-        result = play_match(reference_simulation(blocks=()))
+        result = play_match(reference_simulation(blocks=((1445, 340, 1555, 660),)))
         del result["frames"][-1]["target"]
-        with self.assertRaisesRegex(ValueError, "image 2 .*target.* manquant"):
+        with self.assertRaisesRegex(ValueError, "image [0-9]+ .*target.* manquant"):
             Replay(result)
 
     def test_plays_one_delivery_and_reopens_numbered_attempts(self):
@@ -423,14 +1080,28 @@ class AutomaticMatchTest(unittest.TestCase):
         self.assertEqual(replay.frame["score"], 0)
         self.assertTrue(any(frame["action"].startswith("Prise") for frame in replay.frames))
         self.assertTrue(any(frame["action"].startswith("Dépôt") for frame in replay.frames))
+        self.assertTrue(any(frame["action"].startswith("Retour") for frame in replay.frames[:-1]))
         self.assertEqual(replay.times, sorted(set(replay.times)))
-        self.assertEqual(replay.duration, MATCH_SECONDS)
-        replay.time = MATCH_SECONDS
-        self.assertEqual(replay.frame["score"], 8)
+        self.assertEqual(replay.duration, result["duree"])
+        self.assertLess(replay.duration, MATCH_SECONDS)
+        self.assertFalse(simulation.moving)
+        replay.time = replay.duration
+        self.assertEqual(replay.frames[-2]["score"], 8)
+        self.assertEqual(replay.frame["score"], 18)
+        self.assertEqual(result["score_retour"], 10)
         self.assertEqual(simulation.score, 8)
 
 
 class RobotConfigurationTest(unittest.TestCase):
+    def test_default_equilateral_robot_has_two_front_and_two_side_cups(self):
+        robot = load_robot()
+        a, b, c = robot.contour
+        self.assertTrue(all(abs(dist(p, q) - SIDE) < 1e-6 for p, q in ((a, b), (b, c), (c, a))))
+        self.assertEqual(len(robot.mounts), 4)
+        for (mount, facing), y, angle in zip(robot.mounts, (-100, 105, -105, 100), (0, 120, -120, 0), strict=True):
+            self.assertEqual(mount[1], y)
+            self.assertAlmostEqual(facing.get_distance(Vec2d(1, 0).rotated(radians(angle))), 0)
+
     def test_custom_rectangle_and_cup_drive_collisions_and_grip(self):
         config = """
 contour_mm = [[-120, -80], [120, -80], [120, 80], [-120, 80]]
