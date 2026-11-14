@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from copy import copy, deepcopy
 import json
-from math import cos, hypot, pi, radians, remainder, sin
+from math import cos, hypot, pi, remainder, sin
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -15,10 +15,10 @@ import numpy as np
 from pymunk import Vec2d
 
 from .match import (
-    ALIGNED_ANGLES, CENTERED_DROPS, MATCH_SECONDS, REPLAY_DIR, Replay, _action_state, _drop_approach, _pickup_approach,
-    _shifted_drops, _trials, completion_beep, play_match, save_replay,
+    ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES, MATCH_SECONDS, REPLAY_DIR, Replay, _action_state, _clear, _drop_target,
+    _pickup_approach, _shifted_drops, _trials, _wall_drop_zones, completion_beep, play_match, save_replay,
 )
-from .simulateur import START_BLOCKS, TABLE_HEIGHT, TABLE_WIDTH, WALL_ZONES, Simulation, free_wall_slots, scoring_zones
+from .simulateur import Block, START_BLOCKS, TABLE_HEIGHT, TABLE_WIDTH, WALL_ZONES, Simulation, free_wall_slots, scoring_zones
 
 
 LAYERS = (97, 16, 8, 1)
@@ -80,6 +80,7 @@ def features(simulation, held, choices, *, pickup, pickup_plans=None):
             continue
         if action_state is None:
             action_state = _action_state(simulation)
+        start, footprints, obstacles = action_state
         if pickup:
             duration, index, cup = choice
             block = blocks[index]
@@ -87,13 +88,19 @@ def features(simulation, held, choices, *, pickup, pickup_plans=None):
             gain = 0
             plan = (pickup_plans[index, cup] if pickup_plans is not None
                     else _pickup_approach(simulation, block, cup, action_state))
+            distance = plan.distance_from(start) if plan is not None else -TABLE_DIAGONAL
         else:
             gain, duration, cup, position, angle = choice
             block = blocks[held[cup]]
-            plan = _drop_approach(block, Vec2d(*position), angle, action_state)
-        distance = plan.distance_from(action_state[0]) / TABLE_DIAGONAL if plan is not None else -1
+            end, turn = _drop_target(block, Vec2d(*position), angle, start)
+            rotated = tuple(tuple(Vec2d(*corner).rotated(turn) for corner in shape) for shape in footprints)
+            polygon = tuple(tuple(end + (Vec2d(*corner) - start).rotated(turn)) for corner in block.corners)
+            # Évalue la pose finale. Le simulateur calcule le trajet seulement pour une pose essayée.
+            valid = (_wall_drop_zones(Block(tuple(position), block.angle + turn, polygon))[1]
+                     and _clear(end, end, rotated, obstacles))
+            distance = start.get_distance(end) if valid else -TABLE_DIAGONAL
         mount, facing = simulation.geometry.mounts[cup - 1]
-        rows.append([*state, pickup, *_pose(block.position, block.angle), distance, *_pose(position, angle),
+        rows.append([*state, pickup, *_pose(block.position, block.angle), distance / TABLE_DIAGONAL, *_pose(position, angle),
                      *(value / 380 for value in mount), *facing, duration / 8, gain / 8,
                      (position[0] - simulation.position[0]) / TABLE_WIDTH,
                      (position[1] - simulation.position[1]) / TABLE_HEIGHT])
@@ -277,6 +284,8 @@ class MatchPolicy:
 
 
 class _ReplayDemonstration:
+    multiple_drops = False  # Les démonstrations annotées désignent une seule pose par rempart.
+
     def __init__(self, replay):
         pickups, drops = replay.get("prises"), replay.get("depots")
         if (not isinstance(pickups, list) or not isinstance(drops, list)
@@ -346,7 +355,7 @@ def _replay_examples(replay):
         raise ValueError("Le replay utilise un autre nombre de ventouses. Il reste disponible en lecture.")
     result = play_match(simulation, policy=policy, record_frames=False)
     if (policy.pickups or policy.drops or policy.observed != len(policy.examples)
-            or _replay_rank(result) != _replay_rank(replay) or result["score_retour"] != replay["score_retour"]):
+            or result["score"] != replay["score"] or result["score_retour"] != replay["score_retour"]):
         raise ValueError("Le simulateur ne reproduit pas la démonstration.")
     return policy.examples
 
@@ -402,10 +411,7 @@ def _mutate_drop_pose(network, rng):
     wall = int(rng.integers(len(CENTERED_DROPS)))
     if rng.random() < 0.5:
         angles = list(network.drop_angles)
-        angle = angles[wall]
-        choices = [remainder(angle + radians(delta), pi) for delta in (-45, -30, -15, 15, 30, 45, 90)]
-        if angle:
-            choices.append(0)
+        choices = [angle for angle in DROP_ANGLES if remainder(angle - angles[wall], pi) != 0]
         angles[wall] = choices[int(rng.integers(len(choices)))]
         mutant.drop_angles = tuple(angles)
     else:
@@ -542,20 +548,15 @@ def main():
             network, winner, trained, explored = train_matches(args.matches, args.seed, incumbent, resume=args.resume,
                                                                 mutate_deposits=args.mutate_deposits)
             network.save(args.model)
-            if network is incumbent:
-                print(f"Poids existants conservés dans {args.model}")
-            else:
-                print(f"Meilleurs poids sauvegardés dans {args.model}")
-            print(f"Mémoire d’entraînement · {len(network.experience)} ouvertures conservées")
-            replays = [(f"Meilleur match avec exploration {explored['match']}/{args.matches}", explored)]
+            print("Poids conservés" if network is incumbent else "Poids sauvegardés")
+            print(f"Mémoire · {len(network.experience)} ouvertures")
+            replays = [(f"Exploration {explored['match']}/{args.matches}", explored)]
             if trained is not winner:
-                replays.append(("Meilleur réseau autonome de la session", trained))
-            replays.append(("Réseau autonome sauvegardé", winner))
+                replays.append(("Réseau de la session", trained))
+            replays.append(("Réseau sauvegardé", winner))
             for label, replay in replays:
-                number, path = save_replay(replay)
-                print(f"{label} · {replay['score']} points "
-                      f"en {replay['duree']:.2f} s simulées · replay {number} · {path}")
-                print(f"python -B -m src.match replay {number}")
+                number, _ = save_replay(replay)
+                print(f"{label} · {replay['score']} points en {replay['duree']:.2f} s · replay {number}")
             completion_beep()
             return
 
