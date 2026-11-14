@@ -28,6 +28,8 @@ def create_window(simulation: Simulation):
     ).pack(side="left")
     reset_button = tk.Button(header, text="Reset match")
     reset_button.pack(side="right")
+    score = tk.Label(header, bg=background, fg=foreground, font=("Segoe UI", 11, "bold"))
+    score.pack(side="right", padx=12)
 
     mat = tk.PhotoImage(file=Path(__file__).resolve().parents[1] / "assets" / "tapis_2027.png")
     if root.winfo_screenwidth() < 960 or root.winfo_screenheight() < 760:
@@ -81,6 +83,7 @@ def create_window(simulation: Simulation):
     ).pack(side="right")
 
     def draw():
+        score.configure(text=f"Score jaune : {simulation.score}")
         for item, block in zip(block_items, simulation.blocks):
             canvas.coords(item, *(border + value * scale for corner in block.corners for value in corner))
         x, y = simulation.position

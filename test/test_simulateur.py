@@ -283,6 +283,57 @@ class SimulationTest(unittest.TestCase):
         self.assertEqual(sim.blocks, initial)
         self.assertFalse(any(cup.enabled for cup in sim.suction_cups))
 
+    def test_score_follows_a_pile_pushed_into_and_out_of_a_wall_zone(self):
+        sim = reference_simulation(blocks=((550, 870, 660, 1130),))
+        self.assertEqual(sim.score, 0)
+
+        sim.move_to(715, 1000)
+        sim.advance(1)
+        self.assertEqual(sim.score, 8)
+
+        sim.move_to(1020, 1000)
+        sim.advance(1)
+        self.assertEqual(sim.score, 0)
+
+    def test_score_follows_a_released_pile_at_the_edge_of_a_wall_zone(self):
+        sim = reference_simulation(blocks=((630, 840, 740, 1160),))
+        self.assertEqual(sim.score, 0)
+        sim.toggle_suction(1)
+        sim.move_to(900, 1000)
+        sim.advance(1)
+        x, y = sim.position
+        px, py = sim.blocks[0].position
+        sim.move_to(695 + x - px, 1000 + y - py)
+        sim.advance(1)
+        self.assertEqual(sim.score, 0)
+        sim.toggle_suction(1)
+        self.assertEqual(sim.score, 8)
+
+        sim.toggle_suction(1)
+        self.assertEqual(sim.score, 0)
+        x, y = sim.position
+        sim.move_to(x - 1, y)
+        sim.advance(0.1)
+        sim.toggle_suction(1)
+        self.assertEqual(sim.score, 0)
+
+    def test_two_free_piles_in_one_zone_only_get_one_wall_bonus(self):
+        sim = reference_simulation(blocks=((735, 840, 845, 1160), (855, 840, 965, 1160)))
+        self.assertEqual(sim.score, 11)
+
+    def test_score_counts_stones_in_a_tower_circle_without_a_wall_bonus(self):
+        sim = reference_simulation(blocks=((650, 900, 760, 1220),))
+        sim.toggle_suction(1)
+        sim.move_to(900, 1000)
+        sim.advance(1)
+        sim.turn_by(radians(-80))
+        x, y = sim.position
+        px, py = sim.blocks[0].position
+        sim.move_to(480 + x - px, 240 + y - py)
+        sim.advance(1)
+        sim.toggle_suction(1)
+        self.assertEqual(sim.score, 3)
+
 
 class RobotConfigurationTest(unittest.TestCase):
     def test_custom_rectangle_and_cup_drive_collisions_and_grip(self):

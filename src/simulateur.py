@@ -101,12 +101,25 @@ def rectangle_corners(rectangle: Rectangle) -> tuple[Point, ...]:
     return (left, top), (right, top), (right, bottom), (left, bottom)
 
 
+def _wall_zone(x: float, y: float, angle: float = 0) -> tuple[Point, ...]:
+    return tuple(tuple(pymunk.Vec2d(x, y) + pymunk.Vec2d(*vertex).rotated(radians(angle)))
+                 for vertex in rectangle_corners((-200, -100, 200, 100)))
+
+
+# Remparts jaunes, § D.4 et G.1. Origine au coin supérieur gauche du tapis.
+WALL_ZONES = (_wall_zone(250, 400), _wall_zone(675, 575, 45), _wall_zone(850, 1000, 90),
+              _wall_zone(675, 1425, -45), _wall_zone(250, 1600))
+TOWER_CENTERS = ((500, 400), (850, 750), (850, 1250), (500, 1600))
+TOWER_RADIUS = 100
+
+
 def _world_corners(shape: pymunk.Poly) -> tuple[Point, ...]:
     return tuple(tuple(shape.body.local_to_world(vertex)) for vertex in shape.get_vertices())
 
 
 def polygon_contact(
-    position: Point, delta: Point, corners: tuple[Point, ...], footprint: tuple[Point, ...]
+    position: Point, delta: Point, corners: tuple[Point, ...], footprint: tuple[Point, ...],
+    *, include_boundary: bool = False,
 ) -> float:
     """Renvoie la fraction du trajet où les deux polygones commencent à se chevaucher."""
     x, y = position
@@ -121,7 +134,8 @@ def polygon_contact(
         other_low, other_high = min(bounds), max(bounds)
         speed = dx * ax + dy * ay
         if speed == 0:
-            if high <= other_low or low >= other_high:
+            tolerance = CONTACT_GAP * hypot(ax, ay) if include_boundary else 0
+            if high <= other_low - tolerance or low >= other_high + tolerance:
                 return 1.0
             continue
         first = (other_low - high) / speed
@@ -209,6 +223,14 @@ class _Pile:
     grip: _Grip | None = None
 
 
+def _pile_overlaps_tower_zone(pile: _Pile, center: Point) -> bool:
+    x, y = pile.body.world_to_local(center)
+    length, width = pile.size
+    dx = max(0, abs(x) - length / 2)
+    dy = max(0, abs(y) - width / 2)
+    return dx * dx + dy * dy <= (TOWER_RADIUS + CONTACT_GAP) ** 2
+
+
 class Simulation:
     def __init__(
         self, obstacles: tuple[Rectangle, ...] = (), *, blocks: tuple[Rectangle, ...] = START_BLOCKS,
@@ -282,6 +304,37 @@ class Simulation:
     @property
     def blocks(self) -> tuple[Block, ...]:
         return tuple(self._block(pile) for pile in self._piles)
+
+    @property
+    def score(self) -> int:
+        """Points de construction jaunes d'après la pose actuelle des piles libres."""
+        stones = 0
+        walls: dict[int, tuple[int, ...]] = {}
+
+        def assign_wall(zones: tuple[int, ...], visited: set[int]) -> bool:
+            # Réattribue un mur déjà compté si deux piles se disputent la même zone.
+            for zone in zones:
+                if zone in visited:
+                    continue
+                visited.add(zone)
+                if zone not in walls or assign_wall(walls[zone], visited):
+                    walls[zone] = zones
+                    return True
+            return False
+
+        for pile in self._piles:
+            if pile.grip is not None:
+                continue
+            corners = _world_corners(pile.shape)
+            zones = tuple(index for index, zone in enumerate(WALL_ZONES) if
+                          polygon_contact((0, 0), (0, 0), zone, corners, include_boundary=True) < 1)
+            if zones:
+                stones += 3
+                assign_wall(zones, set())
+            elif any(_pile_overlaps_tower_zone(pile, center) for center in TOWER_CENTERS):
+                stones += 3
+        # TODO : compter les portes et les tours quand le moteur saura représenter ces constructions.
+        return stones + 5 * len(walls)
 
     @staticmethod
     def _block(pile: _Pile) -> Block:

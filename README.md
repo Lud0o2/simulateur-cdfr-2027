@@ -17,6 +17,7 @@ python -B -m src.interface
 - En gardant Q, D ou une flèche enfoncée, la commande se répète après **120 ms**, puis toutes les **60 ms**.
 - Appuie sur la touche associée à la ventouse ou clique sur son repère numéroté. Le repère est **gris** quand la ventouse est coupée et **orange** quand elle est active, même si elle tient une pile. Répète la commande pour couper la ventouse et lâcher la pile.
 - **Reset match** remet le robot dans la salle du trône jaune, replace les piles, coupe les ventouses et remet le temps à zéro.
+- **Score jaune** affiche les points de construction selon la position actuelle des piles libres, qu’elles aient été poussées ou déposées.
 
 Le châssis provisoire défini dans `RobotRobotronik.toml` est un triangle équilatéral de 380 mm avec deux ventouses à l’avant et une sur chaque autre face. L’ordre des ventouses dans le fichier donne leurs numéros. La vitesse du robot est de 1 000 mm/s. Les coordonnées de la table vont de gauche à droite et de haut en bas, en millimètres depuis le coin supérieur gauche du tapis.
 
@@ -48,7 +49,7 @@ La physique tourne à pas fixe avec Pymunk. Les coefficients de frottement et l�
 python -B -m unittest discover -s test -v
 ```
 
-Les tests avancent le même moteur qu’utilise la fenêtre. Ils vérifient le déplacement, les collisions, les poussées, la prise et le relâchement, les collisions avec une pile tenue et la réinitialisation.
+Les tests avancent le même moteur qu’utilise la fenêtre. Ils vérifient le déplacement, les collisions, les poussées, la prise et le relâchement, le score des piles libres et la réinitialisation.
 
 ## Feuille de route
 
@@ -62,20 +63,19 @@ Les tests avancent le même moteur qu’utilise la fenêtre. Ils vérifient le d
 
 ### 2. Piles de pierres et prise par le grand côté
 
-**Étape en cours, presque validée.** Le placement, la poussée, la prise et le relâchement fonctionnent. Il reste à confirmer la prise en pilotage manuel avant de passer à l’étape 3.
+**Validée.**
 
 - Placer les piles selon le plan officiel, gérer leur poussée et rétablir leur position au reset. La position et l’orientation sont connues dans le simulateur, comme elles le seront grâce au mât sur la table réelle.
 - Approcher une pile par l’un de ses deux grands côtés avec la ventouse correspondante activée. La prise est instantanée pour cet essai. Sa durée sera calibrée sur le robot réel. En transport, la pile est fixe par rapport au châssis et son encombrement compte dans les collisions.
 - **Essai manuel.** Sans tourner, place le robot à **Y ≈ 500 mm**, active la ventouse **1** et avance vers la pile centrale. Fais pivoter le robot avec la pile, vérifie que le repère reste orange, puis appuie de nouveau sur **1** pour la lâcher. **Reset match** doit replacer toutes les piles et remettre les repères au gris.
 
-### 3. Constructions, choix de pose et score
+### 3. Score des piles dans les remparts
 
-**À venir après la validation de l’étape 2.**
+**Étape en cours.** Le score jaune suit la position actuelle des piles libres. Une pile poussée dans un rempart peut marquer des points et les perd en ressortant. Une pile tenue vaut zéro tant que le robot la tient.
 
-- Avec une pile, le robot peut déposer les trois pierres empilées en mur, les transformer en porte et déposer l’ensemble en un geste, ou redresser et déposer une tour à la fois en gardant les autres pierres. La transformation et la pose de la porte prennent plus de temps que la pose d’une tour.
-- Générer plusieurs positions et orientations par zone de construction. Calculer la pose du châssis nécessaire pour chaque dépôt et vérifier qu’il peut approcher avec sa charge, déposer et repartir. Inclure des poses où une partie des pierres dépasse de la zone.
-- Recalculer le score à partir des pierres relâchées, de leur projection, de leurs supports et des bonus de construction au buzzer. Compter une seule porte par château. [Règlement de jeu Eurobot 2027, § E.1 et F](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
-- **Validation.** Vérifier à la main les cas d’un mur, d’une porte et de tours posées une par une. Tester une pierre partiellement en zone et une pierre encore tenue à la fin.
+- Une pile libre rapporte **3 points** si sa projection touche un rempart jaune, même partiellement. Chaque zone rectangulaire peut donner un **bonus de 5 points** pour un mur. Une pile ne compte qu’une fois, même si elle touche plusieurs zones. [Règlement de jeu Eurobot 2027, § D.4, E.1, F et G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
+- **Essai manuel.** À partir du départ, avance à **X ≈ 250, Y ≈ 500 mm** sans tourner. Active la ventouse **1** et avance vers la pile centrale. Avec la pile tenue, rejoins **X ≈ 650, Y ≈ 1 000 mm**. Une fois à l’arrêt, relâche la pile et vérifie les **8 points**. Reprends-la pour vérifier le retour à **0**. Une pile relâchée qui touche seulement un cercle de tour rapporte **3 points**.
+- **TODO.** Ajouter les portes et les tours lorsque ces constructions seront simulées.
 
 ### 4. Match automatique et replay
 
