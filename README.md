@@ -11,7 +11,7 @@ Le simulateur compare des stratégies de match et entraîne un réseau de neuron
 | [3. Score des piles dans les remparts](#3-score-des-piles-dans-les-remparts) | Validée |
 | [4. Match automatique et replay](#4-match-automatique-et-replay) | Validée |
 | [5. Actions indépendantes, stratégie multi-piles et entraînement](#5-actions-indépendantes-stratégie-multi-piles-et-entraînement) | **Validée** |
-| [6. Plusieurs dépôts par zone](#6-plusieurs-dépôts-par-zone) | **Prochaine étape** |
+| [6. Plusieurs dépôts par zone](#6-plusieurs-dépôts-par-zone) | **À valider sur `codex/etape-6`** |
 | [7. Construction des murs et des portes](#7-construction-des-murs-et-des-portes) | Prévue |
 | [8. Duels contre des robots holonomes et différentiels](#8-duels-contre-des-robots-holonomes-et-différentiels) | Prévue |
 | [9. Entraînement et comparaison des stratégies](#9-entraînement-et-comparaison-des-stratégies) | Prévue |
@@ -19,11 +19,19 @@ Le simulateur compare des stratégies de match et entraîne un réseau de neuron
 
 ## Commandes principales
 
-**Ouvrir le dernier replay**
+Depuis la racine du dépôt, installe les dépendances Python. Pour le pilotage manuel et les replays, prépare aussi [l’image du tapis](#source-du-tapis).
 
 ```powershell
-python -B -m src.match replay
+python -m pip install -r requirements.txt
 ```
+
+**Ouvrir le replay de référence de l’étape 5**
+
+```powershell
+python -B -m src.match replay 49
+```
+
+Omet le numéro pour ouvrir le dernier replay enregistré.
 
 **Reprendre les poids sauvegardés et jouer 100 matchs d’entraînement**
 
@@ -31,7 +39,7 @@ python -B -m src.match replay
 python -B -m src.reseau train --resume --matches 100
 ```
 
-Pour créer les premiers poids, lance `python -B -m src.reseau train`.
+Pour entraîner un nouveau réseau dans un fichier distinct, choisis un nom de fichier encore libre avec `python -B -m src.reseau --model reseau-nouveau.npz train`.
 
 **Tester aussi des positions et des angles de dépôt**
 
@@ -41,10 +49,9 @@ python -B -m src.reseau train --resume --matches 100 --mutate-deposits
 
 ## Lancer le simulateur
 
-Depuis le dossier du projet, avec Python 3.12 et Tkinter. Pour un nouveau clone, prépare d’abord [l’image du tapis](#source-du-tapis).
+Utilise Python 3.12 avec Tkinter. Une fois [les dépendances installées](#commandes-principales) et [le tapis préparé](#source-du-tapis), lance le pilotage manuel.
 
 ```powershell
-python -m pip install -r requirements.txt
 python -B -m src.interface
 ```
 
@@ -209,11 +216,11 @@ La commande `python -B -m src.reseau imitate NUMERO` reprend les poids sauvegard
 
 ### 6. Plusieurs dépôts par zone
 
-**Prochaine étape.**
+**À valider.** La branche [`codex/etape-6`](https://github.com/Lud0o2/simulateur-cdfr-2027/tree/codex/etape-6) propose plusieurs emplacements et orientations par rempart. Le robot peut continuer à poser dans une zone déjà occupée si la pose et l’approche restent possibles.
 
-- Proposer plusieurs points de pose dans une même zone de construction pour y déposer plusieurs piles et marquer avec davantage de pierres.
-- Faire varier la position des points de pose pendant l’entraînement et laisser le réseau choisir parmi les poses accessibles en fonction des piles déjà déposées et du temps restant.
-- **Validation.** Déposer au moins deux piles dans la même zone à des emplacements distincts. Vérifier que le simulateur compte chaque pierre admissible une seule fois, que le passage réservé reste libre et que le robot peut rentrer.
+Sur cette branche, `python -B -m src.match replay 64` montre **62 points en 56,90 s simulées**, avec neuf dépôts et un retour complet. [Replay de référence de l’étape 6](https://github.com/Lud0o2/simulateur-cdfr-2027/blob/a96507546bafa3df11a04a0927c39168644152dc/replays/essai-0064.json)
+
+- **À vérifier pour la validation.** Déposer au moins deux piles dans une même zone à des emplacements distincts. Vérifier le comptage des pierres, le passage réservé et le retour du robot.
 
 ### 7. Construction des murs et des portes
 
