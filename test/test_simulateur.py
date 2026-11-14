@@ -11,16 +11,16 @@ import numpy as np
 from pymunk import Vec2d
 
 from src.match import (
-    ALIGNED_ANGLES, MATCH_SECONDS, Replay, _action_state, _approach, _clear, _drop_approach,
-    _follow, _pickup_approach, _route, place_pile, play_match, save_replay, take_pile,
+    ALIGNED_ANGLES, ALTERNATE_DROPS, CENTERED_DROPS, MATCH_SECONDS, Replay, _action_state, _approach, _clear,
+    _drop_approach, _follow, _pickup_approach, _route, place_pile, play_match, save_replay, take_pile,
 )
 from src.reseau import (
     ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, LAYERS, TABLE_DIAGONAL, MatchPolicy, Network,
     _ReplayDemonstration, _mutate_drop_pose, _replay_examples, _replay_rank, features, train_matches,
 )
 from src.simulateur import (
-    START, START_BLOCKS, TOWER_CENTERS, TURN_STEP, WALL_ZONES, RobotGeometry, Simulation, load_robot,
-    rectangle_corners, travel_time,
+    START, START_BLOCKS, TOWER_CENTERS, TURN_STEP, RobotGeometry, Simulation, load_robot,
+    rectangle_corners, scoring_zones, travel_time,
 )
 
 
@@ -132,6 +132,8 @@ class TrainingReplayTest(unittest.TestCase):
             changes = sum(a != b for a, b in zip(mutant.drop_offsets, network.drop_offsets))
             changes += sum(a != b for a, b in zip(mutant.drop_angles, network.drop_angles))
             self.assertEqual(changes, 1)
+            for angle in mutant.drop_angles:
+                self.assertAlmostEqual(angle / radians(10), round(angle / radians(10)))
         self.assertEqual(farthest, DROP_OFFSET_LIMIT)
 
     def test_each_generation_continues_with_the_best_network_on_the_official_table(self):
@@ -253,8 +255,13 @@ class TrainingReplayTest(unittest.TestCase):
             main()
         self.assertEqual([call.args[0]["frames"] for call in save.call_args_list], [[22.85], [24.31], [19.96]])
         save_model.assert_called_once_with(Path("reseau.npz"))
-        for number in range(51, 54):
-            output.assert_any_call(f"python -B -m src.match replay {number}")
+        self.assertEqual([call.args[0] for call in output.call_args_list[-5:]], [
+            "Poids conservés",
+            "Mémoire · 0 ouvertures",
+            "Exploration 1/1 · 50 points en 22.85 s · replay 51",
+            "Réseau de la session · 50 points en 24.31 s · replay 52",
+            "Réseau sauvegardé · 50 points en 19.96 s · replay 53",
+        ])
 
     def test_resume_explores_alternatives_among_the_five_best_choices(self):
         class RankedNetwork:
@@ -969,13 +976,64 @@ class AutomaticMatchTest(unittest.TestCase):
         replay = play_match(Simulation(blocks=blocks), batches=True)
         self.assertEqual(max(sum(enabled for _, enabled in frame["cups"]) for frame in replay["frames"]), 4)
 
-    def test_centered_strategy_limits_loading_to_remaining_walls(self):
-        occupied = ((90, 345, 410, 455), (90, 1545, 410, 1655), (795, 840, 905, 1160))
-        simulation = Simulation(blocks=START_BLOCKS[:5] + occupied)
-        rows = features(simulation, {}, [(1, 0, 1)], pickup=True)
-        self.assertAlmostEqual(rows[0, 78], 0.6)
-        replay = play_match(simulation, batches=True)
-        self.assertEqual(max(sum(enabled for _, enabled in frame["cups"]) for frame in replay["frames"]), 2)
+    def test_strategy_can_score_another_pile_in_an_occupied_wall_and_return(self):
+        class PreferSameWall:
+            def order(self, _simulation, _held, choices, *, pickup, **_options):
+                if pickup:
+                    return choices
+                # Demande d'abord le centre occupé, puis le dépôt le plus proche sur ce côté.
+                return sorted(choices, key=lambda choice: (choice[3].get_distance((250, 445)), choice[1]))
+
+            def observe(self, _choice):
+                pass
+
+        simulation = Simulation(blocks=(START_BLOCKS[0], (90, 345, 410, 455)))
+        self.assertEqual(simulation.score, 8)
+        replay = play_match(simulation, policy=PreferSameWall())
+        placed, existing = simulation.blocks
+        self.assertEqual(scoring_zones(placed), ((0,), True))
+        self.assertEqual(scoring_zones(existing), ((0,), True))
+        self.assertLess(dist(placed.position, (250, 520)), 0.001)
+        self.assertEqual(existing.position, (250, 400))
+        self.assertEqual(simulation.score, 11)
+        self.assertEqual(replay["score_retour"], 10)
+        self.assertLess(replay["duree"], MATCH_SECONDS)
+
+    def test_deposit_angles_cover_half_a_turn_at_each_position(self):
+        poses = ALTERNATE_DROPS[:len(ALTERNATE_DROPS) // len(CENTERED_DROPS)]
+        self.assertEqual(len({site for site, _ in poses}), 7)
+        for site in {position for position, _ in poses}:
+            self.assertEqual([angle for position, angle in poses if position == site],
+                             [radians(angle) for angle in range(-90, 90, 10)])
+
+    def test_match_rounds_angles_from_an_older_network_to_the_current_grid(self):
+        network = Network(np.random.default_rng(0))
+        network.drop_angles = (radians(16), *ALIGNED_ANGLES[1:])
+        replay = play_match(Simulation(blocks=()), policy=MatchPolicy(network))
+        self.assertEqual(replay["rotations_depot_rad"], (radians(20), *ALIGNED_ANGLES[1:]))
+        self.assertEqual(network.drop_angles[0], radians(16))
+
+    def test_strategy_can_turn_a_pile_50_degrees_at_200_mm_from_the_wall_center(self):
+        class PreferDiagonalDrop:
+            def order(self, _simulation, _held, choices, *, pickup, **_options):
+                if pickup:
+                    return choices
+                return sorted(choices, key=lambda choice: (choice[3].get_distance((1010, 880)),
+                                                          abs(remainder(choice[4] - radians(140), pi))))
+
+            def observe(self, _choice):
+                pass
+
+        simulation = Simulation(blocks=(START_BLOCKS[8], (705, 840, 815, 1160)))
+        self.assertEqual(simulation.score, 8)
+        replay = play_match(simulation, policy=PreferDiagonalDrop())
+        placed, existing = simulation.blocks
+        self.assertLess(dist(placed.position, (1010, 880)), 0.001)
+        self.assertAlmostEqual(remainder(placed.angle - radians(140), pi), 0)
+        self.assertEqual(scoring_zones(placed), ((2,), True))
+        self.assertEqual(existing.position, (760, 1000))
+        self.assertEqual(simulation.score, 11)
+        self.assertEqual(replay["score_retour"], 10)
 
     def test_network_learns_and_reloads_its_action_values(self):
         rng = np.random.default_rng(7)
@@ -992,7 +1050,8 @@ class AutomaticMatchTest(unittest.TestCase):
             np.testing.assert_array_equal(Network.load(path).predict(rows), network.predict(rows))
 
     def test_strategy_loads_two_piles_before_scoring_with_separate_deposits(self):
-        replay = Replay(play_match(two_pile_simulation(), batches=True))
+        simulation = two_pile_simulation()
+        replay = Replay(play_match(simulation, batches=True))
 
         def state(frame):
             return sum(enabled for _, enabled in frame["cups"]), frame["score"]
@@ -1001,17 +1060,7 @@ class AutomaticMatchTest(unittest.TestCase):
                          [(0, 0), (1, 0), (2, 0), (1, 8), (0, 16)])
         deposits = [frame for frame in replay.frames if frame["action"].startswith("Dépôt ")]
         self.assertEqual(list(map(state, deposits)), [(1, 8), (0, 16)])
-        angles = {tuple(round(value) for value in (Vec2d(*a) + Vec2d(*c)) / 2):
-                  (Vec2d(*b) - Vec2d(*a)).angle for a, b, c, _ in WALL_ZONES}
-        for frame in deposits:
-            pile = frame["piles"][int(frame["action"].split()[2]) - 1]
-            center = tuple(sum(axis) / 4 for axis in zip(*pile))
-            expected = tuple(map(round, center))
-            self.assertIn(expected, angles)
-            self.assertLess(dist(center, expected), 0.001)
-            edge = max((Vec2d(*b) - Vec2d(*a) for a, b in zip(pile, pile[1:] + pile[:1])),
-                       key=lambda side: side.length)
-            self.assertAlmostEqual(remainder(edge.angle - angles[expected], pi), 0, places=5)
+        self.assertEqual(len({scoring_zones(block)[0] for block in simulation.blocks}), 2)
         self.assertLess(replay.duration, MATCH_SECONDS)
 
     def test_interrupted_save_leaves_only_the_previous_replay(self):

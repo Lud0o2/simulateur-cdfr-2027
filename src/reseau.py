@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from copy import copy, deepcopy
 import json
-from math import cos, hypot, pi, radians, remainder, sin
+from math import cos, hypot, pi, remainder, sin
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -15,8 +15,8 @@ import numpy as np
 from pymunk import Vec2d
 
 from .match import (
-    ALIGNED_ANGLES, CENTERED_DROPS, MATCH_SECONDS, REPLAY_DIR, Replay, _action_state, _drop_approach, _pickup_approach,
-    _shifted_drops, _trials, completion_beep, play_match, save_replay,
+    ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES, MATCH_SECONDS, REPLAY_DIR, Replay, _action_state, _drop_approach,
+    _pickup_approach, _shifted_drops, _trials, completion_beep, play_match, save_replay,
 )
 from .simulateur import START_BLOCKS, TABLE_HEIGHT, TABLE_WIDTH, WALL_ZONES, Simulation, free_wall_slots, scoring_zones
 
@@ -277,6 +277,8 @@ class MatchPolicy:
 
 
 class _ReplayDemonstration:
+    multiple_drops = False  # Les démonstrations annotées désignent une seule pose par rempart.
+
     def __init__(self, replay):
         pickups, drops = replay.get("prises"), replay.get("depots")
         if (not isinstance(pickups, list) or not isinstance(drops, list)
@@ -402,10 +404,7 @@ def _mutate_drop_pose(network, rng):
     wall = int(rng.integers(len(CENTERED_DROPS)))
     if rng.random() < 0.5:
         angles = list(network.drop_angles)
-        angle = angles[wall]
-        choices = [remainder(angle + radians(delta), pi) for delta in (-45, -30, -15, 15, 30, 45, 90)]
-        if angle:
-            choices.append(0)
+        choices = [angle for angle in DROP_ANGLES if remainder(angle - angles[wall], pi) != 0]
         angles[wall] = choices[int(rng.integers(len(choices)))]
         mutant.drop_angles = tuple(angles)
     else:
@@ -542,20 +541,15 @@ def main():
             network, winner, trained, explored = train_matches(args.matches, args.seed, incumbent, resume=args.resume,
                                                                 mutate_deposits=args.mutate_deposits)
             network.save(args.model)
-            if network is incumbent:
-                print(f"Poids existants conservés dans {args.model}")
-            else:
-                print(f"Meilleurs poids sauvegardés dans {args.model}")
-            print(f"Mémoire d’entraînement · {len(network.experience)} ouvertures conservées")
-            replays = [(f"Meilleur match avec exploration {explored['match']}/{args.matches}", explored)]
+            print("Poids conservés" if network is incumbent else "Poids sauvegardés")
+            print(f"Mémoire · {len(network.experience)} ouvertures")
+            replays = [(f"Exploration {explored['match']}/{args.matches}", explored)]
             if trained is not winner:
-                replays.append(("Meilleur réseau autonome de la session", trained))
-            replays.append(("Réseau autonome sauvegardé", winner))
+                replays.append(("Réseau de la session", trained))
+            replays.append(("Réseau sauvegardé", winner))
             for label, replay in replays:
-                number, path = save_replay(replay)
-                print(f"{label} · {replay['score']} points "
-                      f"en {replay['duree']:.2f} s simulées · replay {number} · {path}")
-                print(f"python -B -m src.match replay {number}")
+                number, _ = save_replay(replay)
+                print(f"{label} · {replay['score']} points en {replay['duree']:.2f} s · replay {number}")
             completion_beep()
             return
 

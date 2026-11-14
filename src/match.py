@@ -7,7 +7,7 @@ from functools import lru_cache
 from heapq import heappop, heappush
 from itertools import pairwise
 import json
-from math import atan2, ceil, copysign, floor, hypot, pi, remainder
+from math import atan2, ceil, copysign, floor, hypot, pi, radians, remainder
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -30,6 +30,7 @@ PICKUP_STANDOFF = 25  # mm entre la ventouse et le grand côté au départ
 PICKUP_STROKE = 50  # mm vers la pile
 PICKUP_GAP = 2  # mm entre la ventouse et le grand côté au moment de la prise
 DROP_RETREAT = 50  # mm à l'opposé de la ventouse après la dépose
+ROUTE_MARGIN = 5  # mm autour des obstacles pendant les trajets
 REPLAY_DIR = Path(__file__).resolve().parents[1] / "replays"
 
 
@@ -47,6 +48,18 @@ CENTERED_DROPS = tuple(
     for a, b, c, _ in (tuple(Vec2d(*corner) for corner in zone) for zone in WALL_ZONES)
 )
 ALIGNED_ANGLES = (0,) * len(CENTERED_DROPS)
+# Les deux sens d'approche couvrent aussi +90° pour la même empreinte qu'à −90°.
+DROP_ANGLES = tuple(radians(angle) for angle in range(-90, 90, 10))
+ALTERNATE_DROPS = tuple(
+    (site + Vec2d(length, width).rotated(axis), axis + rotation)
+    for site, axis in CENTERED_DROPS
+    for length, width in (
+        (0, 0), (0, -120), (0, 120),
+        (-200, 0), (200, 0),
+        (-120, -160), (120, 160),
+    )
+    for rotation in DROP_ANGLES
+)
 
 
 def _shifted_drops(offsets, angles):
@@ -106,7 +119,7 @@ def _clear(start, end, footprints, obstacles):
     return _clear_bounded(start, end, tuple((shape, _bounds(shape)) for shape in footprints), obstacles)
 
 
-def _clear_bounded(start, end, footprints, obstacles):
+def _clear_bounded(start, end, footprints, obstacles, margin=0):
     delta = end - start
     min_x, max_x = sorted((start.x, end.x))
     min_y, max_y = sorted((start.y, end.y))
@@ -117,57 +130,92 @@ def _clear_bounded(start, end, footprints, obstacles):
         sweep_left, sweep_right = min_x + left, max_x + right
         sweep_top, sweep_bottom = min_y + top, max_y + bottom
         for corners, (x1, y1, x2, y2) in obstacles:
-            if sweep_left >= x2 or sweep_right <= x1 or sweep_top >= y2 or sweep_bottom <= y1:
+            if (sweep_left >= x2 + margin or sweep_right <= x1 - margin
+                    or sweep_top >= y2 + margin or sweep_bottom <= y1 - margin):
                 continue
-            if swept_contact(start, delta, _planned_axes(corners, footprint)) < 1:
+            if swept_contact(start, delta, _planned_axes(corners, footprint, margin)) < 1:
                 return False
     return True
 
 
 @lru_cache(maxsize=4096)
-def _planned_axes(corners, footprint):
-    return tuple(contact_axes(corners, footprint))
+def _planned_axes(corners, footprint, margin):
+    return tuple((x, y, low, high, left - gap, right + gap)
+                 for x, y, low, high, left, right in contact_axes(corners, footprint)
+                 for gap in (margin * hypot(x, y),))
 
 
 @lru_cache(maxsize=64)
-def _visibility(footprints, obstacles):
+def _visibility(footprints, obstacles, margin):
     footprints = tuple((shape, _bounds(shape)) for shape in footprints)
 
     @lru_cache(maxsize=4096)
     def visible(start, end):
-        return _clear_bounded(start, end, footprints, obstacles)
+        return _clear_bounded(start, end, footprints, obstacles, margin)
 
     return visible
+
+
+@lru_cache(maxsize=256)
+def _obstacle_waypoints(footprints, obstacles):
+    points = []
+    for footprint in footprints:
+        left, top, right, bottom = _bounds(footprint)
+        for _, (x1, y1, x2, y2) in obstacles:
+            # Coins du rectangle interdit au centre du châssis par cette paire de contours.
+            gap = ROUTE_MARGIN + 1
+            blocked = (x1 - right - gap, y1 - bottom - gap, x2 - left + gap, y2 - top + gap)
+            points.append((blocked, tuple(Vec2d(*point) for point in rectangle_corners(blocked))))
+    return tuple(points)
 
 
 # Les empreintes et les obstacles font partie de la clé, y compris après un déplacement de pile.
 @lru_cache(maxsize=4096)
 def _route(start, end, footprints, obstacles, limit=float("inf")):
-    """A* sur les points de passage, avec raccourcis en visibilité directe."""
+    """A* sur les segments libres, en minimisant le temps de translation."""
     direct = _segment_time(start, end)
     if direct > limit:
         return (), 0
-    visible = _visibility(footprints, obstacles)
+    visible = _visibility(footprints, obstacles, ROUTE_MARGIN)
     if visible(start, end):
         return (end,), direct
     if not visible(start, start) or not visible(end, end):
-        return (), 0
-    points = dict.fromkeys((end, Vec2d(start.x, end.y), Vec2d(end.x, start.y), *WAYPOINTS))
-    remaining = {point: _segment_time(point, end)
-                 for point in points if point != start and visible(point, point)}
+        exact = _visibility(footprints, obstacles, 0)
+        if not exact(start, start) or not exact(end, end):
+            return (), 0
+        # Les gestes serrés peuvent entrer dans les derniers millimètres de marge.
+        close = {point for point in (start, end) if not visible(point, point)}
+        clear = visible
+
+        def visible(a, b):
+            if a in close or b in close:
+                return exact(a, b)
+            return clear(a, b)
+
+        if visible(start, end):
+            return (end,), direct
+    left, right = sorted((start.x, end.x))
+    top, bottom = sorted((start.y, end.y))
+    corners = (point for (x1, y1, x2, y2), points in _obstacle_waypoints(footprints, obstacles)
+               if left <= x2 and right >= x1 and top <= y2 and bottom >= y1
+               for point in points)
+    points = dict.fromkeys((Vec2d(start.x, end.y), Vec2d(end.x, start.y), *corners, *WAYPOINTS))
+    remaining = {end: 0.0}
+    start_times = {}
     best = {start: 0.0}
     infinity = float("inf")
     # Un détour court donne une borne pour éviter de développer les branches plus lentes.
-    start_times = {point: _segment_time(start, point) for point in remaining if point != end}
-    for duration, target in sorted((cost + remaining[point], point) for point, cost in start_times.items()):
+    ranked = sorted((_segment_time(start, point) + _segment_time(point, end), point)
+                    for point in points if point != start and point != end)
+    for duration, target in ranked:
         if duration > limit:
             break
+        if not visible(target, target):
+            continue
+        start_times[target] = _segment_time(start, target)
+        remaining[target] = _segment_time(target, end)
         if visible(start, target) and visible(target, end):
             limit = duration
-            break
-    # Les trajets directs donnent une borne basse, même si les deux segments sont bloqués.
-    remaining = {point: tail for point, tail in remaining.items()
-                 if point == end or start_times[point] + tail <= limit + CONTACT_GAP}
     pending = [(direct, 0.0, start, ())]
     while pending:
         _, duration, point, path = heappop(pending)
@@ -208,8 +256,14 @@ def _turn_envelope(footprint, rotated, angle):
     return rectangle_corners(_bounds(tuple(points)))
 
 
+# Plusieurs poses de dépose peuvent demander le même pivot.
+@lru_cache(maxsize=16384)
+def _pivot_clear(position, footprints, angle, polygons):
+    return Simulation.rotation_clear(position, footprints, angle, polygons)
+
+
 @lru_cache(maxsize=4096)
-def _approach(start, end, angle, footprints, obstacles, *, retreat=False) -> Approach | None:
+def _approach(start, end, angle, footprints, obstacles) -> Approach | None:
     """Cherche un trajet avec une rotation en roulant ou un pivot dans un espace libre."""
     polygons = tuple(corners for corners, _ in obstacles)
     rotated = tuple(tuple(Vec2d(*corner).rotated(angle) for corner in shape) for shape in footprints)
@@ -226,10 +280,14 @@ def _approach(start, end, angle, footprints, obstacles, *, retreat=False) -> App
             turning_end = start + (end - start) * (turning_distance / distance)
             envelopes = tuple(_turn_envelope(shape, final, angle)
                               for shape, final in zip(footprints, rotated, strict=True))
-            if _clear(start, turning_end, envelopes, obstacles) and _clear(turning_end, end, rotated, obstacles):
+            if (_visibility(envelopes, obstacles, ROUTE_MARGIN)(start, turning_end)
+                    and _visibility(rotated, obstacles, ROUTE_MARGIN)(turning_end, end)):
                 return Approach(travel_time(distance), (end,), angle, (), rolling=True)
     # shortcut: un seul changement de cap par trajet, à étendre pour les passages plus étroits.
-    pivots = (start, end, OPEN_SPACE, *WAYPOINTS) if angle else (start,)
+    pivots = (start,)
+    if angle:
+        along = tuple(start + (end - start) * fraction for fraction in (0.25, 0.5, 0.75))
+        pivots = (start, end, *along, OPEN_SPACE, *WAYPOINTS)
     pivots = [(_segment_time(start, pivot), _segment_time(pivot, end), pivot)
               for pivot in dict.fromkeys(pivots)]
     for first_direct, last, pivot in sorted(pivots, key=lambda p: p[0] + p[1]):
@@ -238,31 +296,15 @@ def _approach(start, end, angle, footprints, obstacles, *, retreat=False) -> App
         limit = remaining + CONTACT_GAP
         if first_direct + last > limit:
             break
+        if angle and not _pivot_clear(pivot, footprints, angle, polygons):
+            continue
         before, first = _route(start, pivot, footprints, obstacles, limit - last)
         if not before:
-            continue
-        if angle and not Simulation.rotation_clear(pivot, footprints, angle, polygons):
             continue
         after, second = _route(pivot, end, rotated, obstacles, limit - first)
         duration = first + second + turn_time
         if after and (best is None or duration < best.duration):
             best = Approach(duration, before, angle, after)
-    if best is None and retreat:
-        # Se dégager du chargement et des piles déposées avant de chercher le détour.
-        exits = (start + Vec2d(dx, dy) * distance for distance in (100, 150)
-                 for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy)
-        for point in sorted(exits, key=start.get_distance):
-            exit_time = travel_time(start.get_distance(point))
-            if best is not None and exit_time + travel_time(point.get_distance(end)) >= best.duration:
-                continue
-            if not _clear(start, point, footprints, obstacles):
-                continue
-            option = _approach(point, end, angle, footprints, obstacles)
-            if option is None:
-                continue
-            duration = exit_time + option.duration
-            if best is None or duration < best.duration:
-                best = replace(option, duration=duration, before=(point, *option.before))
     return best
 
 
@@ -419,7 +461,7 @@ def _drop_approach(block, destination, angle, state):
     if not _wall_drop_zones(Block(tuple(destination), block.angle + turn, corners))[1]:
         return None
     end = destination - (center - start).rotated(turn)
-    return _approach(start, end, turn, footprints, obstacles, retreat=True)
+    return _approach(start, end, turn, footprints, obstacles)
 
 
 def place_pile(simulation: Simulation, cup: int, x: float, y: float, angle: float, *, advance=None,
@@ -555,7 +597,7 @@ def _frame(simulation, label):
     }
 
 
-def _play_batches(simulation, record, policy, drop_poses):
+def _play_batches(simulation, record, policy, drop_poses, multiple_drops):
     """Charge les ventouses disponibles et dépose les piles une par une."""
     def perform(action, label, **choice):
         def advance(seconds):
@@ -571,7 +613,8 @@ def _play_batches(simulation, record, policy, drop_poses):
         while len(held) < len(cups) and simulation.time < BUILD_DEADLINE:
             blocks = simulation.blocks
             carried = set(held.values())
-            if len(held) >= free_wall_slots(block for index, block in enumerate(blocks) if index not in carried):
+            if not multiple_drops and len(held) >= free_wall_slots(
+                    block for index, block in enumerate(blocks) if index not in carried):
                 break
             free_cups = tuple(cup for cup in cups if cup not in held)
             choices = []
@@ -622,7 +665,10 @@ def _play_batches(simulation, record, policy, drop_poses):
             blocks = simulation.blocks
             sites = tuple(scoring_zones(block) for index, block in enumerate(blocks) if index not in held.values())
             score = construction_score(sites)
-            start = Vec2d(*simulation.position)
+            if multiple_drops:
+                start, _, obstacles = _action_state(simulation)
+            else:
+                start = Vec2d(*simulation.position)
             placements = []
             for cup, index in held.items():
                 block = blocks[index]
@@ -631,7 +677,10 @@ def _play_batches(simulation, record, policy, drop_poses):
                     axis_turn = remainder(angle - block.angle, 2 * pi)
                     relative = tuple((Vec2d(*corner) - center).rotated(axis_turn) for corner in block.corners)
                     corners = tuple(tuple(site + corner) for corner in relative)
-                    zones = scoring_zones(Block(tuple(site), angle, corners))
+                    projected = Block(tuple(site), angle, corners)
+                    zones = _wall_drop_zones(projected) if multiple_drops else scoring_zones(projected)
+                    if multiple_drops and (not zones[1] or not _clear(site, site, (relative,), obstacles)):
+                        continue
                     gain = construction_score((*sites, zones)) - score
                     # À gain égal, éviter de remplir d'abord le passage central des remparts.
                     central_penalty = max(0, 650 - abs(site.y - TABLE_HEIGHT / 2)) / 400
@@ -706,7 +755,7 @@ def _return_home(simulation, record):
             direct = _segment_time(start, target)
             if best is not None and direct >= best.duration:
                 continue
-            route = _approach(start, target, turn, footprints, obstacles, retreat=True)
+            route = _approach(start, target, turn, footprints, obstacles)
             if (route is not None and simulation.time + route.duration <= deadline
                     and (best is None or route.duration < best.duration)):
                 best = route
@@ -739,7 +788,14 @@ def play_match(simulation: Simulation, *, batches=False, policy=None, record_fra
     offsets = getattr(policy, "drop_offsets", None)
     angles = getattr(policy, "drop_angles", ALIGNED_ANGLES)
     if batches:
-        _play_batches(simulation, record, policy, _shifted_drops(offsets, angles) if offsets else CENTERED_DROPS)
+        multiple_drops = getattr(policy, "multiple_drops", True)
+        if multiple_drops:
+            angles = tuple(min(DROP_ANGLES, key=lambda candidate: abs(remainder(candidate - angle, pi)))
+                           for angle in angles)
+        drop_poses = _shifted_drops(offsets, angles) if offsets else CENTERED_DROPS
+        if multiple_drops:
+            drop_poses = tuple(dict.fromkeys((*drop_poses, *ALTERNATE_DROPS)))
+        _play_batches(simulation, record, policy, drop_poses, multiple_drops)
     else:
         _play_reference(simulation, record)
 

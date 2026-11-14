@@ -11,7 +11,7 @@ Le simulateur compare des stratégies de match et entraîne un réseau de neuron
 | [3. Score des piles dans les remparts](#3-score-des-piles-dans-les-remparts) | Validée |
 | [4. Match automatique et replay](#4-match-automatique-et-replay) | Validée |
 | [5. Actions indépendantes, stratégie multi-piles et entraînement](#5-actions-indépendantes-stratégie-multi-piles-et-entraînement) | **Validée** |
-| [6. Plusieurs dépôts par zone](#6-plusieurs-dépôts-par-zone) | **Prochaine étape** |
+| [6. Plusieurs dépôts par zone](#6-plusieurs-dépôts-par-zone) | **À valider** |
 | [7. Construction des murs et des portes](#7-construction-des-murs-et-des-portes) | Prévue |
 | [8. Duels contre des robots holonomes et différentiels](#8-duels-contre-des-robots-holonomes-et-différentiels) | Prévue |
 | [9. Entraînement et comparaison des stratégies](#9-entraînement-et-comparaison-des-stratégies) | Prévue |
@@ -169,9 +169,9 @@ Chaque action renvoie `True` si elle réussit. Les trajets vérifient l’encomb
 
 La prise automatique utilise un seul décalage par ventouse. Une ventouse seule saisit le milieu du grand côté. Si deux ventouses partagent une face, chaque pile est décalée vers l’extérieur pour laisser 10 mm entre deux piles de même taille. Avec le robot actuel et des piles de 320 mm, cela décale chaque pile de 65 mm.
 
-La stratégie multi-piles limite chaque chargement aux ventouses libres et au nombre de remparts encore libres. Elle propose d’abord les prises aux trajets les plus courts en temps, rotation comprise. Sans réseau, entre des prises à 50 ms de la plus rapide, elle privilégie celle qui demande le plus petit changement de cap. Si une prise échoue en cours de déplacement, elle recalcule les autres prises depuis la nouvelle pose.
+La stratégie multi-piles propose d’abord les prises aux trajets les plus courts en temps, rotation comprise. Sans réseau, entre des prises à 50 ms de la plus rapide, elle privilégie celle qui demande le plus petit changement de cap. Si une prise échoue en cours de déplacement, elle recalcule les autres prises depuis la nouvelle pose.
 
-Elle classe les dépôts par gain immédiat, durée estimée et dégagement du passage central. Par défaut, la pile est centrée et alignée sur la longueur du rempart. Le réseau peut utiliser les poses retenues par mutation. Si un trajet échoue, le robot essaie aussi d’aborder ce même dépôt avec un demi-tour de différence. Les cercles sont réservés aux futures actions de tour. Des piles peuvent rester en charge si les remparts deviennent inaccessibles. [Règlement Eurobot 2027, § D.4 et plan G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
+Elle classe les dépôts par gain immédiat, durée estimée et dégagement du passage central. Le robot peut aborder chaque dépôt dans les deux sens. Les cercles sont réservés aux futures actions de tour. Des piles peuvent rester en charge si les remparts deviennent inaccessibles. [Règlement Eurobot 2027, § D.4 et plan G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
 
 #### Entraînement et validation
 
@@ -187,7 +187,7 @@ python -B -m src.reseau compare
 
 Un match d’entraînement sur huit choisit ses actions au hasard parmi toutes les prises accessibles et tous les dépôts proposés. Il poursuit la construction tant qu’une prise reste accessible à vide. Pour chaque ouverture, définie par les deux premières piles prises, l’entraînement conserve les décisions et les récompenses du meilleur match qui a marqué des points de construction. Les candidats réutilisent aussi des exemples tirés de cette mémoire. `reseau.npz` conserve cette mémoire et le nombre de matchs joués, même quand le meilleur réseau reste le même. Avec `--resume`, les tirages et la fréquence des matchs aléatoires tiennent compte des sessions précédentes.
 
-Avec `--mutate-deposits`, chaque candidat modifie la position ou l’angle d’un seul dépôt. Le centre de la pile peut se trouver jusqu’à 200 mm du centre du rempart. L’angle peut varier par pas de 15° jusqu’à la position perpendiculaire au rempart. Le simulateur vérifie le trajet, les collisions et la zone. Un match autonome valide chaque mutation. Seule une amélioration du score, ou du temps à score égal, permet de conserver la mutation. Le fichier `reseau.npz` contient les poids et les poses retenues, avec `drop_offsets` pour les décalages en millimètres et `drop_angles` pour les rotations en radians. À la reprise ou en match, le réseau retrouve ces mêmes poses. Un ancien fichier sans `drop_angles` garde les piles alignées sur leur rempart.
+Avec `--mutate-deposits`, chaque candidat modifie la position ou l’angle d’un seul dépôt. Le centre de la pile peut se trouver jusqu’à 200 mm du centre du rempart. Les angles suivent les pas de 10° de l’étape 6. Le simulateur vérifie le trajet, les collisions et la zone. Un match autonome valide chaque mutation. Seule une amélioration du score, ou du temps à score égal, permet de conserver la mutation. Le fichier `reseau.npz` contient les poids et les poses retenues, avec `drop_offsets` pour les décalages en millimètres et `drop_angles` pour les rotations en radians. En match multi-piles, les anciens angles sont ramenés au pas le plus proche. Un ancien fichier sans `drop_angles` retrouve une pose alignée sur chaque rempart.
 
 L’entraînement choisit automatiquement le nombre de processus selon les cœurs logiques disponibles et le nombre de matchs demandé. Les matchs d’une génération partent du meilleur réseau validé jusque-là. Un candidat privilégie la meilleure trajectoire explorée du lot et les autres apprennent sur l’historique des matchs. Les candidats jouent chacun un match de validation sans exploration sur la table officielle, en parallèle. Le score prime, puis le temps simulé le plus court à score égal. À égalité complète, le meilleur réseau déjà validé garde sa place. Le gagnant sert de point de départ à la génération suivante.
 
@@ -199,7 +199,7 @@ Le 14 novembre 2026, la réutilisation des poses et des zones de score a ramené
 
 Sans `--seed`, l’entraînement utilise la graine `7`. Passe `--seed` avec un autre entier pour changer la suite des tirages. La graine utilisée figure dans le replay.
 
-À la fin de chaque entraînement, `train` sauvegarde le meilleur match avec exploration et le meilleur match autonome de la session. Si un réseau déjà sur disque conserve la première place, son match est aussi sauvegardé et affiché sous « Réseau autonome sauvegardé ». Chaque replay a sa commande d’ouverture. Le dernier replay correspond au réseau dans `reseau.npz`.
+À la fin de chaque entraînement, `train` sauvegarde le meilleur match avec exploration et le meilleur match autonome de la session. Si un réseau déjà sur disque conserve la première place, son match est aussi sauvegardé et affiché sous « Réseau sauvegardé ». Le résumé affiche les numéros des replays. Le dernier replay correspond au réseau dans `reseau.npz`.
 
 Le 14 novembre 2026, une reprise de 24 matchs avec mutations et validations sur huit processus a pris **19,91 s au lieu de 37,02 s**, à poids de départ et graines identiques. Le moteur réutilise les contours des piles tant que leur pose reste la même et écarte les détours dont la durée minimale dépasse la meilleure route connue. L’entraînement enregistre les décisions puis calcule les images en rejouant le seul match avec exploration retenu. Les replays sauvegardés et le modèle final étaient identiques dans cet essai.
 
@@ -209,11 +209,19 @@ La commande `python -B -m src.reseau imitate NUMERO` reprend les poids sauvegard
 
 ### 6. Plusieurs dépôts par zone
 
-**Prochaine étape.**
+**À valider.**
 
-- Proposer plusieurs points de pose dans une même zone de construction pour y déposer plusieurs piles et marquer avec davantage de pierres.
-- Faire varier la position des points de pose pendant l’entraînement et laisser le réseau choisir parmi les poses accessibles en fonction des piles déjà déposées et du temps restant.
-- **Validation.** Déposer au moins deux piles dans la même zone à des emplacements distincts. Vérifier que le simulateur compte chaque pierre admissible une seule fois, que le passage réservé reste libre et que le robot peut rentrer.
+- Chaque rempart propose sept emplacements. Le centre, les deux décalages latéraux de 120 mm, les deux décalages longitudinaux de 200 mm et les deux décalages diagonaux de 200 mm sont testés de −90° à +90° par pas de 10°, par rapport à la longueur du rempart. Les deux angles perpendiculaires ont la même empreinte et correspondent aux deux sens d’approche. Le réseau peut aussi choisir la pose retenue par mutation pour ce rempart.
+- Le simulateur écarte les emplacements occupés ou hors rempart avant de chercher un trajet, puis vérifie l’approche avec tout le chargement. Le robot peut continuer à prendre des piles lorsque chaque rempart contient déjà une pile.
+- Une pile supplémentaire dans le même rempart ajoute **3 points**. Le bonus de **5 points** du rempart est compté une seule fois.
+
+Le 14 novembre 2026, trois matchs avec les poids de reprise (un autonome, puis deux avec exploration, graines 7 et 11) ont pris **43,2 s de temps processeur au lieu de 61,5 s**. La recherche réutilise les vérifications de rotation pour une même pose et les mêmes obstacles, et écarte plus tôt les détours trop longs. Les trois replays et leurs historiques de décisions sont identiques avant et après.
+
+Le 14 novembre 2026, la stratégie multi-piles avec la grille de 10° a marqué **62 points en 56,90 s** sur la table officielle. Le replay 64 montre neuf dépôts et un retour complet. Avec la grille précédente, le replay 61 du réseau avait atteint **56 points en 41,79 s**, avec sept dépôts et un retour complet.
+
+```powershell
+python -B -m src.match replay 64
+```
 
 ### 7. Construction des murs et des portes
 
