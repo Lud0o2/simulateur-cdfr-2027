@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from functools import cache
 from math import atan2, cos, hypot, isfinite, pi, radians, sin, sqrt
@@ -204,7 +205,6 @@ class Block:
 class SuctionCup:
     position: Point
     enabled: bool
-    holding: bool = False
 
 
 @dataclass(frozen=True)
@@ -223,12 +223,42 @@ class _Pile:
     grip: _Grip | None = None
 
 
-def _pile_overlaps_tower_zone(pile: _Pile, center: Point) -> bool:
-    x, y = pile.body.world_to_local(center)
-    length, width = pile.size
-    dx = max(0, abs(x) - length / 2)
-    dy = max(0, abs(y) - width / 2)
-    return dx * dx + dy * dy <= (TOWER_RADIUS + CONTACT_GAP) ** 2
+def scoring_zones(block: Block) -> tuple[tuple[int, ...], bool]:
+    walls = tuple(index for index, zone in enumerate(WALL_ZONES) if
+                  polygon_contact((0, 0), (0, 0), zone, block.corners, include_boundary=True) < 1)
+    if walls:
+        return walls, True
+    origin = pymunk.Vec2d(*block.position)
+    half_x, half_y = (pymunk.Vec2d(*block.corners[0]) - origin).rotated(-block.angle)
+    for center in TOWER_CENTERS:
+        x, y = (pymunk.Vec2d(*center) - origin).rotated(-block.angle)
+        dx = max(0, abs(x) - abs(half_x))
+        dy = max(0, abs(y) - abs(half_y))
+        if dx * dx + dy * dy <= (TOWER_RADIUS + CONTACT_GAP) ** 2:
+            return (), True
+    return (), False
+
+
+def construction_score(sites: Iterable[tuple[tuple[int, ...], bool]]) -> int:
+    stones = 0
+    walls: dict[int, tuple[int, ...]] = {}
+
+    def assign_wall(zones: tuple[int, ...], visited: set[int]) -> bool:
+        # Réattribue un mur déjà compté si deux piles se disputent la même zone.
+        for zone in zones:
+            if zone in visited:
+                continue
+            visited.add(zone)
+            if zone not in walls or assign_wall(walls[zone], visited):
+                walls[zone] = zones
+                return True
+        return False
+
+    for zones, scoring in sites:
+        stones += 3 * scoring
+        assign_wall(zones, set())
+    # TODO : compter les portes et les tours quand le moteur saura représenter ces constructions.
+    return stones + 5 * len(walls)
 
 
 class Simulation:
@@ -238,7 +268,7 @@ class Simulation:
     ):
         self.obstacles = obstacles
         self._initial_blocks = blocks
-        self._geometry = load_robot() if robot is None else robot
+        self.geometry = load_robot() if robot is None else robot
         self.reset()
 
     def reset(self):
@@ -259,7 +289,7 @@ class Simulation:
 
         self._robot = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
         self._robot.position = START
-        robot_shape = pymunk.Poly(self._robot, self._geometry.contour)
+        robot_shape = pymunk.Poly(self._robot, self.geometry.contour)
         robot_shape.friction = 0.7
         self._space.add(self._robot, robot_shape)
 
@@ -291,7 +321,7 @@ class Simulation:
     @property
     def footprint(self) -> tuple[Point, ...]:
         cosine, sine = cos(self.heading), sin(self.heading)
-        return tuple((x * cosine - y * sine, x * sine + y * cosine) for x, y in self._geometry.contour)
+        return tuple((x * cosine - y * sine, x * sine + y * cosine) for x, y in self.geometry.contour)
 
     @property
     def moving(self) -> bool:
@@ -308,33 +338,19 @@ class Simulation:
     @property
     def score(self) -> int:
         """Points de construction jaunes d'après la pose actuelle des piles libres."""
-        stones = 0
-        walls: dict[int, tuple[int, ...]] = {}
+        return construction_score(scoring_zones(self._block(pile)) for pile in self._piles if pile.grip is None)
 
-        def assign_wall(zones: tuple[int, ...], visited: set[int]) -> bool:
-            # Réattribue un mur déjà compté si deux piles se disputent la même zone.
-            for zone in zones:
-                if zone in visited:
-                    continue
-                visited.add(zone)
-                if zone not in walls or assign_wall(walls[zone], visited):
-                    walls[zone] = zones
-                    return True
-            return False
+    def held_pile(self, cup: int) -> int | None:
+        return next((index for index, pile in enumerate(self._piles) if pile.grip and pile.grip.cup == cup), None)
 
-        for pile in self._piles:
-            if pile.grip is not None:
-                continue
-            corners = _world_corners(pile.shape)
-            zones = tuple(index for index, zone in enumerate(WALL_ZONES) if
-                          polygon_contact((0, 0), (0, 0), zone, corners, include_boundary=True) < 1)
-            if zones:
-                stones += 3
-                assign_wall(zones, set())
-            elif any(_pile_overlaps_tower_zone(pile, center) for center in TOWER_CENTERS):
-                stones += 3
-        # TODO : compter les portes et les tours quand le moteur saura représenter ces constructions.
-        return stones + 5 * len(walls)
+    def can_turn_freely(self, angle: float) -> bool:
+        position, footprint = self.position, self.footprint
+        destination = tuple(pymunk.Vec2d(*vertex).rotated(angle) for vertex in footprint)
+        return not self._turn_crosses_border(position, footprint, destination, angle) and not any(
+            self._turn_hits(position, footprint, destination, angle, polygon)
+            for polygon in (*(rectangle_corners(obstacle) for obstacle in self.obstacles),
+                            *(block.corners for block in self.blocks))
+        )
 
     @staticmethod
     def _block(pile: _Pile) -> Block:
@@ -349,15 +365,14 @@ class Simulation:
 
     @property
     def suction_cups(self) -> tuple[SuctionCup, ...]:
-        holding = {pile.grip.cup for pile in self._piles if pile.grip}
-        enabled = self._armed_cups | holding
+        enabled = self._armed_cups | {pile.grip.cup for pile in self._piles if pile.grip}
         return tuple(
-            SuctionCup(tuple(self._robot.local_to_world(mount)), number in enabled, number in holding)
-            for number, (mount, _) in enumerate(self._geometry.mounts, 1)
+            SuctionCup(tuple(self._robot.local_to_world(mount)), number in enabled)
+            for number, (mount, _) in enumerate(self.geometry.mounts, 1)
         )
 
     def toggle_suction(self, number: int):
-        if not isinstance(number, int) or not 1 <= number <= len(self._geometry.mounts):
+        if not isinstance(number, int) or not 1 <= number <= len(self.geometry.mounts):
             raise ValueError("Numéro de ventouse inconnu.")
         if number in self._armed_cups:
             self._armed_cups.remove(number)
@@ -381,7 +396,7 @@ class Simulation:
     def _capture_piles(self):
         captured = False
         for number in sorted(self._armed_cups):
-            mount, normal = self._geometry.mounts[number - 1]
+            mount, normal = self.geometry.mounts[number - 1]
             point = self._robot.local_to_world(mount)
             for pile in self._piles:
                 if pile.grip:
@@ -530,7 +545,7 @@ class Simulation:
         ):
             self._robot.body_type = pymunk.Body.DYNAMIC
             self._robot.mass = ROBOT_MASS
-            self._robot.moment = pymunk.moment_for_poly(ROBOT_MASS, self._geometry.contour)
+            self._robot.moment = pymunk.moment_for_poly(ROBOT_MASS, self.geometry.contour)
             self._pivot = pymunk.PivotJoint(self._space.static_body, self._robot, position)
             self._space.add(self._pivot)
             self._turn_target = target
@@ -561,7 +576,8 @@ class Simulation:
         self._robot.angle = (heading + pi) % (2 * pi) - pi
         self._space.reindex_shapes_for_body(self._robot)
 
-    def _turn_crosses_border(self, position: Point, footprint: tuple[Point, ...],
+    @staticmethod
+    def _turn_crosses_border(position: Point, footprint: tuple[Point, ...],
                              destination: tuple[Point, ...], angle: float) -> bool:
         x, y = position
         if any(not (0 <= x + dx <= TABLE_WIDTH and 0 <= y + dy <= TABLE_HEIGHT) for dx, dy in destination):

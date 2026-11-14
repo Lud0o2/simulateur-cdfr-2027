@@ -5,7 +5,7 @@
 - `src/simulateur.py` contient l’état du match et la physique Pymunk. Le pilotage manuel, les tests et le futur entraînement utilisent le même moteur. Le moteur doit pouvoir être importé et avancé sans fenêtre, sans chargement du tapis et sans attente en temps réel.
 - `src/interface.py` gère le rendu Tkinter, les commandes manuelles et la conversion des pixels en millimètres. Les règles du jeu et les collisions appartiennent au moteur.
 - `RobotRobotronik.toml` définit le contour et les ventouses du robot. Utiliser cette géométrie pour les collisions, les prises et l’affichage, et déduire les commandes de la liste des ventouses.
-- `test/` contient les tests `unittest`, `assets/` les ressources d’affichage et `include/` est réservé aux éventuels en-têtes natifs.
+- `test/` contient les tests `unittest` et `assets/` les ressources d’affichage.
 
 ## Simulation et vérification
 

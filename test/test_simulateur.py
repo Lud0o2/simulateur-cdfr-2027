@@ -1,11 +1,14 @@
+import json
 import unittest
 from functools import partial
 from math import cos, dist, radians, sin, sqrt
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import mock_open, patch
 
 from pymunk import Vec2d
 
+from src.match import MATCH_SECONDS, Replay, play_match, save_replay
 from src.simulateur import START, TURN_STEP, RobotGeometry, Simulation, load_robot
 
 
@@ -333,6 +336,59 @@ class SimulationTest(unittest.TestCase):
         sim.advance(1)
         sim.toggle_suction(1)
         self.assertEqual(sim.score, 3)
+
+
+class AutomaticMatchTest(unittest.TestCase):
+    def test_interrupted_save_leaves_only_the_previous_replay(self):
+        def interrupt_write(_replay, file, **_options):
+            file.write('{"frames":')
+            file.flush()
+            self.assertEqual(list(directory.glob("essai-*.json")), [first])
+            raise KeyboardInterrupt
+
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            directory = Path(folder)
+            replay = play_match(reference_simulation(blocks=()))
+            _, first = save_replay(replay, directory)
+            with patch("src.match.json.dump", side_effect=interrupt_write):
+                with self.assertRaises(KeyboardInterrupt):
+                    save_replay(replay, directory)
+            self.assertEqual(list(directory.iterdir()), [first])
+            self.assertEqual(Replay(json.loads(first.read_text(encoding="utf-8"))).duration, MATCH_SECONDS)
+            self.assertEqual(save_replay(replay, directory)[0], 2)
+
+    def test_replay_starts_at_first_timestamp(self):
+        simulation = reference_simulation(blocks=())
+        simulation.advance(5)
+        replay = Replay(play_match(simulation))
+        self.assertEqual(replay.time, 5)
+        self.assertEqual(replay.frame["t"], 5)
+        replay.time = 0
+        self.assertEqual(replay.frame["t"], 5)
+
+    def test_replay_rejects_a_later_frame_with_a_missing_field(self):
+        result = play_match(reference_simulation(blocks=()))
+        del result["frames"][-1]["target"]
+        with self.assertRaisesRegex(ValueError, "image 2 .*target.* manquant"):
+            Replay(result)
+
+    def test_plays_one_delivery_and_reopens_numbered_attempts(self):
+        simulation = reference_simulation(blocks=((1445, 340, 1555, 660),))
+        result = play_match(simulation)
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            first = save_replay(result, Path(folder))
+            second = save_replay(result, Path(folder))
+            self.assertEqual((first[0], second[0]), (1, 2))
+            self.assertEqual(second[1].name, "essai-0002.json")
+            replay = Replay(json.loads(first[1].read_text(encoding="utf-8")))
+        self.assertEqual(replay.frame["score"], 0)
+        self.assertTrue(any(frame["action"].startswith("Prise") for frame in replay.frames))
+        self.assertTrue(any(frame["action"].startswith("Dépôt") for frame in replay.frames))
+        self.assertEqual(replay.times, sorted(set(replay.times)))
+        self.assertEqual(replay.duration, MATCH_SECONDS)
+        replay.time = MATCH_SECONDS
+        self.assertEqual(replay.frame["score"], 8)
+        self.assertEqual(simulation.score, 8)
 
 
 class RobotConfigurationTest(unittest.TestCase):
