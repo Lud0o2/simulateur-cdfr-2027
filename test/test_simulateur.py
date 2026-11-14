@@ -15,7 +15,8 @@ from src.match import (
     _drop_approach, _follow, _pickup_approach, _route, place_pile, play_match, save_replay, take_pile,
 )
 from src.reseau import (
-    ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, LAYERS, TABLE_DIAGONAL, MatchPolicy, Network,
+    ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, EXPLORATION_INTERVAL, LAYERS, PROGRESS_WINDOW, TABLE_DIAGONAL,
+    MatchPolicy, Network,
     _ReplayDemonstration, _mutate_drop_pose, _replay_examples, _replay_rank, features, train_matches,
 )
 from src.simulateur import (
@@ -80,24 +81,97 @@ class TrainingReplayTest(unittest.TestCase):
             loaded = Network.load(path)
             self.assertEqual(loaded.experience[4, 1][0], (42, -25))
             self.assertEqual(loaded.training_matches, 8)
+            self.assertEqual(loaded.matches_without_progress, 8)
             train.reset_mock()
             train_matches(1, 7, loaded, resume=True)
+            self.assertEqual(loaded.matches_without_progress, 9)
             inputs, targets, _ = train.call_args.args
             np.testing.assert_array_equal(inputs[-1], remembered)
             self.assertAlmostEqual(float(targets[-1]), (42 + 0.5 * (1 - 25 / MATCH_SECONDS)) / 8)
 
     def test_short_sessions_continue_the_random_match_schedule(self):
         network = Network(np.random.default_rng(7))
-        network.training_matches = 7
+        total = EXPLORATION_INTERVAL * (PROGRESS_WINDOW // EXPLORATION_INTERVAL + 1)
+        network.training_matches = total - 1
+        network.matches_without_progress = PROGRESS_WINDOW - 1
 
         def play(_simulation, *, policy, record_frames=True):
             if policy.rng is not None:
                 self.assertTrue(policy.random_match)
             return {"score": 50, "duree": 20}
 
-        with patch("src.reseau.play_match", side_effect=play):
+        with (patch("src.reseau.play_match", side_effect=play), patch("builtins.print") as output,
+              patch("src.reseau.save_replay") as save):
             train_matches(1, 7, network, resume=True)
-        self.assertEqual(network.training_matches, 8)
+        self.assertEqual(network.training_matches, total)
+        self.assertEqual(network.matches_without_progress, PROGRESS_WINDOW)
+        output.assert_any_call(f"Progression · 0 % · {PROGRESS_WINDOW} match(s) sans nouveau record autonome · plateau",
+                               flush=True)
+        save.assert_not_called()
+
+    def test_endless_resets_from_scratch_and_keeps_a_replay_per_series(self):
+        incumbent = Network(np.random.default_rng(7))
+        incumbent.training_matches = incumbent.matches_without_progress = 49
+        incumbent.biases[-1][0] = 99
+        incumbent.drop_angles = (radians(10), *incumbent.drop_angles[1:])
+        incumbent.experience[0, 1] = (50, -20), np.full((1, LAYERS[0] + 1), 42, dtype=np.float32)
+        scores = {99: (50, 20), 1: (51, 25), 0: (40, 30), 2: (50, 15)}
+        played = [0, 0]
+        saved = []
+
+        def play(_simulation, *, policy, record_frames=True):
+            if policy.rng is None:
+                score, duration = scores[policy.network.biases[-1][0]]
+                return {"score": score, "duree": duration}
+            series = len(saved)
+            if series == 2:
+                raise KeyboardInterrupt
+            played[series] += 1
+            self.assertLessEqual(played[series], 56)
+            if series == 1 and played[1] == 1:
+                self.assertFalse(policy.resume)
+                self.assertEqual(policy.network.training_matches, 0)
+                self.assertEqual(policy.network.biases[-1][0], 0)
+                self.assertNotEqual(policy.drop_angles, incumbent.drop_angles)
+                self.assertFalse(np.array_equal(policy.network.weights[0], incumbent.weights[0]))
+            policy.history.append((np.zeros(LAYERS[0]), 0))
+            return {"score": 64, "duree": 12}
+
+        def update(network, inputs, _targets, _rng, *, learning_rate):
+            if not saved and played[0] >= 6:
+                network.biases[-1][0] = 1
+            if saved:
+                self.assertFalse((inputs == 42).any())
+                network.biases[-1][0] = 2
+
+        def save_series(replay, *, descriptive):
+            saved.append(replay["serie"])
+            return save_replay(replay, directory=Path(directory), descriptive=descriptive)
+
+        from src.reseau import main
+
+        with (TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory,
+              patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
+              patch("src.reseau.PROGRESS_WINDOW", 50),
+              patch("src.reseau.os.process_cpu_count", return_value=3, create=True),
+              patch("src.reseau.ProcessPoolExecutor") as pool, patch("builtins.print") as output,
+              patch("src.reseau.save_replay", side_effect=save_series)):
+            pool.return_value.__enter__.return_value.map = map
+            model = Path(directory) / "reseau.npz"
+            incumbent.save(model)
+            with patch("sys.argv", ["reseau", "--model", str(model), "train", "--endless", "--resume"]):
+                main()
+            self.assertEqual(Network.load(model).biases[-1][0], 1)
+            paths = sorted(Path(directory).glob("essai-*.json"))
+            replays = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+
+        self.assertEqual(played, [56, 53])
+        self.assertEqual(saved, [1, 2])
+        self.assertEqual([path.name for path in paths], ["essai-0001-51pts-25.00s.json", "essai-0002-50pts-15.00s.json"])
+        self.assertEqual([_replay_rank(replay) for replay in replays], [(51, -25), (50, -15)])
+        self.assertEqual([call.args[0].split(" · ")[0] for call in output.call_args_list], [
+            "Record", "Record", "Réinitialisation", "Record", "Réinitialisation", "Entraînement arrêté.",
+        ])
 
     def test_deposit_mutations_are_kept_only_when_the_autonomous_match_improves(self):
         incumbent = Network(np.random.default_rng(0))
@@ -170,10 +244,15 @@ class TrainingReplayTest(unittest.TestCase):
             network.biases[-1][0] = next(versions)
 
         with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
+              patch("src.reseau.PROGRESS_WINDOW", 50),
               patch("src.reseau.os.process_cpu_count", return_value=2, create=True),
-              patch("src.reseau.ProcessPoolExecutor") as pool):
+              patch("src.reseau.ProcessPoolExecutor") as pool, patch("builtins.print") as output):
             pool.return_value.__enter__.return_value.map = map
             best, winner, trained, explored = train_matches(6, 7, incumbent, resume=True)
+        output.assert_any_call("Progression · 100 % · nouveau record autonome · +8 points", flush=True)
+        output.assert_any_call("Progression · 100 % · nouveau record autonome · 10.00 s gagnées", flush=True)
+        output.assert_any_call("Progression · 96 % · 2 match(s) sans nouveau record autonome", flush=True)
+        self.assertEqual(best.matches_without_progress, 2)
         pool.assert_called_once_with(max_workers=2)
         self.assertEqual(training_weights, [0, 0, 1, 1, 3, 3])
         self.assertEqual(candidate_parents, training_weights)
@@ -1132,14 +1211,25 @@ class AutomaticMatchTest(unittest.TestCase):
             Replay(result)
 
     def test_plays_one_delivery_and_reopens_numbered_attempts(self):
+        from src.match import main
+
         simulation = reference_simulation(blocks=((1445, 340, 1555, 660),))
         result = play_match(simulation)
         with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
-            first = save_replay(result, Path(folder))
-            second = save_replay(result, Path(folder))
-            self.assertEqual((first[0], second[0]), (1, 2))
-            self.assertEqual(second[1].name, "essai-0002.json")
-            replay = Replay(json.loads(first[1].read_text(encoding="utf-8")))
+            directory = Path(folder)
+            first = save_replay(result, directory)
+            with patch("src.match._trials", return_value={}):
+                second = save_replay(result, directory, descriptive=True)
+                third = save_replay(result, directory)
+            self.assertEqual((first[0], second[0], third[0]), (1, 2, 3))
+            self.assertEqual(second[1].name, f"essai-0002-{result['score']}pts-{result['duree']:.2f}s.json")
+            self.assertEqual(set(directory.iterdir()), {first[1], second[1], third[1]})
+            with patch("src.match.REPLAY_DIR", directory), patch("src.interface.create_window") as window:
+                for number in (1, 2):
+                    with patch("sys.argv", ["match", "replay", str(number)]):
+                        main()
+                    self.assertEqual(window.call_args.kwargs["trial"], number)
+                replay = window.call_args.kwargs["replay"]
         self.assertEqual(replay.frame["score"], 0)
         self.assertTrue(any(frame["action"].startswith("Prise") for frame in replay.frames))
         self.assertTrue(any(frame["action"].startswith("Dépôt") for frame in replay.frames))

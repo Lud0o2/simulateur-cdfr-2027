@@ -190,15 +190,27 @@ L’entraînement alterne la stratégie multi-piles, l’exploration et les déc
 python -B -m src.reseau compare
 ```
 
-`train --resume` repart des poids de `reseau.npz` et affiche le chemin du fichier chargé. Lors des matchs guidés en reprise, le réseau explore une autre action dans 30 % des décisions, parmi les choix du deuxième au cinquième rang. Quand le robot est chargé, une place est réservée à la prise la plus rapide vers une autre pile. Le taux d’apprentissage est de 0,005 en reprise et de 0,01 avec une nouvelle initialisation.
+`train --resume` repart des poids de `reseau.npz`. Lors des matchs guidés en reprise, le réseau explore une autre action dans 30 % des décisions, parmi les choix du deuxième au cinquième rang. Quand le robot est chargé, une place est réservée à la prise la plus rapide vers une autre pile. Le taux d’apprentissage est de 0,005 en reprise et de 0,01 avec une nouvelle initialisation.
 
-Un match d’entraînement sur huit choisit ses actions au hasard parmi toutes les prises accessibles et tous les dépôts proposés. Il poursuit la construction tant qu’une prise reste accessible à vide. Pour chaque ouverture, définie par les deux premières piles prises, l’entraînement conserve les décisions et les récompenses du meilleur match qui a marqué des points de construction. Les candidats réutilisent aussi des exemples tirés de cette mémoire. `reseau.npz` conserve cette mémoire et le nombre de matchs joués, même quand le meilleur réseau reste le même. Avec `--resume`, les tirages et la fréquence des matchs aléatoires tiennent compte des sessions précédentes.
+Un match d’entraînement sur huit choisit ses actions au hasard parmi toutes les prises accessibles et tous les dépôts proposés. Il poursuit la construction tant qu’une prise reste accessible à vide. Pour chaque ouverture, définie par les deux premières piles prises, l’entraînement conserve les décisions et les récompenses du meilleur match qui a marqué des points de construction. Les candidats réutilisent aussi des exemples tirés de cette mémoire. En fin d’entraînement à durée fixe, `reseau.npz` conserve cette mémoire et le nombre de matchs joués, même quand le meilleur réseau reste le même. Avec `--resume`, les tirages et la fréquence des matchs aléatoires tiennent compte des sessions précédentes.
 
 Avec `--mutate-deposits`, chaque candidat modifie la position ou l’angle d’un seul dépôt. Le centre de la pile peut se trouver jusqu’à 200 mm du centre du rempart. Les angles suivent les pas de 10° de l’étape 6. Le simulateur vérifie le trajet, les collisions et la zone. Un match autonome valide chaque mutation. Seule une amélioration du score, ou du temps à score égal, permet de conserver la mutation. Le fichier `reseau.npz` contient les poids et les poses retenues, avec `drop_offsets` pour les décalages en millimètres et `drop_angles` pour les rotations en radians. En match multi-piles, les anciens angles sont ramenés au pas le plus proche. Un ancien fichier sans `drop_angles` retrouve une pose alignée sur chaque rempart.
 
-L’entraînement choisit automatiquement le nombre de processus selon les cœurs logiques disponibles et le nombre de matchs demandé. Les matchs d’une génération partent du meilleur réseau validé jusque-là. Un candidat privilégie la meilleure trajectoire explorée du lot et les autres apprennent sur l’historique des matchs. Les candidats jouent chacun un match de validation sans exploration sur la table officielle, en parallèle. Le score prime, puis le temps simulé le plus court à score égal. À égalité complète, le meilleur réseau déjà validé garde sa place. Le gagnant sert de point de départ à la génération suivante.
+L’entraînement choisit automatiquement le nombre de processus selon les cœurs logiques disponibles et la taille des lots. Les matchs d’une génération partent du meilleur réseau validé jusque-là. Un candidat privilégie la meilleure trajectoire explorée du lot et les autres apprennent sur l’historique des matchs. Les candidats jouent chacun un match de validation sans exploration sur la table officielle, en parallèle. Le score prime, puis le temps simulé le plus court à score égal. À égalité complète, le meilleur réseau déjà validé garde sa place. Le gagnant sert de point de départ à la génération suivante.
 
-Pour chaque match exploré, le journal affiche le score, la durée simulée et le nombre de décisions retenues, y compris le choix de rentrer. À la fin de chaque génération, il affiche le meilleur résultat sans exploration et le record avec exploration.
+Avec `--matches`, le journal affiche le score, la durée simulée et le nombre de décisions de chaque match exploré, y compris le choix de rentrer. À la fin de chaque génération, il affiche le meilleur résultat sans exploration et le record avec exploration.
+
+L’indicateur de progression revient à **100 %** lorsque le réseau autonome marque davantage de points ou termine plus vite à score égal. Il descend jusqu’à **0 %** quand le nombre de matchs sans nouveau record autonome atteint `PROGRESS_WINDOW`, le seuil défini dans `src/reseau.py`. Le compteur est sauvegardé dans `reseau.npz` et repris avec `--resume`. Il démarre à zéro pour les anciens fichiers de poids. Un record en exploration apparaît séparément dans le journal.
+
+#### Entraînement en boucle
+
+```powershell
+python -B -m src.reseau train --endless
+```
+
+Le mode `--endless` démarre avec des poids aléatoires. Avec `--resume`, seule la première série repart du fichier de poids. Quand le nombre de matchs sans améliorer le record autonome de la série atteint `PROGRESS_WINDOW`, le programme sauvegarde le replay de ce record, change de graine et recrée un réseau avec des poids aléatoires, une mémoire vide et les poses de dépôt par défaut. `python -B -m src.reseau train --help` indique le seuil actuel.
+
+Le terminal affiche les records et les réinitialisations. Les fichiers de replay incluent le numéro, le score et le temps simulé, au format `essai-0042-53pts-42.19s.json`. La commande `python -B -m src.match replay NUMERO` ouvre le replay avec ce numéro. `reseau.npz` conserve le meilleur réseau validé sur la table officielle, même quand la série active repart de zéro. `Ctrl+C` arrête l’entraînement.
 
 Le 14 novembre 2026, un essai de **24 matchs d’entraînement** avec la graine 8 a pris **17,9 s** sur 8 processus, dont **11,9 s** pour les matchs d’entraînement. La validation finale a joué 6 matchs, contre 75 avec la validation après chaque mise à jour. Les poids d’origine ont été conservés lors de cet essai.
 
@@ -206,7 +218,7 @@ Le 14 novembre 2026, la réutilisation des poses et des zones de score a ramené
 
 Sans `--seed`, l’entraînement utilise la graine `7`. Passe `--seed` avec un autre entier pour changer la suite des tirages. La graine utilisée figure dans le replay.
 
-À la fin de chaque entraînement, `train` sauvegarde le meilleur match avec exploration et le meilleur match autonome de la session. Si un réseau déjà sur disque conserve la première place, son match est aussi sauvegardé et affiché sous « Réseau sauvegardé ». Le résumé affiche les numéros des replays. Le dernier replay correspond au réseau dans `reseau.npz`.
+À la fin d’un entraînement à durée fixe, `train` sauvegarde le meilleur match avec exploration et le meilleur match autonome de la session. Si un réseau déjà sur disque conserve la première place, son match est aussi sauvegardé et affiché sous « Réseau sauvegardé ». Le résumé affiche les numéros des replays. Le dernier replay correspond au réseau dans `reseau.npz`.
 
 Le 14 novembre 2026, une reprise de 24 matchs avec mutations et validations sur huit processus a pris **19,91 s au lieu de 37,02 s**, à poids de départ et graines identiques. Le moteur réutilise les contours des piles tant que leur pose reste la même et écarte les détours dont la durée minimale dépasse la meilleure route connue. L’entraînement enregistre les décisions puis calcule les images en rejouant le seul match avec exploration retenu. Les replays sauvegardés et le modèle final étaient identiques dans cet essai.
 

@@ -5,11 +5,12 @@ from bisect import bisect_right
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from heapq import heappop, heappush
-from itertools import pairwise
+from itertools import count, pairwise
 import json
 from math import atan2, ceil, copysign, floor, hypot, pi, radians, remainder
 import os
 from pathlib import Path
+import re
 from tempfile import NamedTemporaryFile
 from time import perf_counter
 
@@ -895,13 +896,14 @@ def _play_reference(simulation, record):
 def _trials(directory: Path):
     trials = {}
     for path in directory.glob("essai-*.json"):
-        suffix = path.stem.removeprefix("essai-")
-        if suffix.isascii() and suffix.isdecimal() and path.is_file():
-            trials[int(suffix)] = path
+        match = re.fullmatch(r"essai-([0-9]+)(?:--?[0-9]+pts-[0-9]+\.[0-9]{2}s)?", path.stem)
+        if match and path.is_file():
+            trials[int(match[1])] = path
     return trials
 
 
-def save_replay(replay, directory: Path = REPLAY_DIR):
+def save_replay(replay, directory: Path = REPLAY_DIR, *, descriptive=False):
+    suffix = f"-{replay['score']:d}pts-{replay['duree']:.2f}s" if descriptive else ""
     directory.mkdir(parents=True, exist_ok=True)
     file = NamedTemporaryFile(dir=directory, prefix=".essai-", suffix=".tmp", encoding="utf-8",
                               mode="w", delete=False)
@@ -913,19 +915,28 @@ def save_replay(replay, directory: Path = REPLAY_DIR):
             file.flush()
             os.fsync(file.fileno())
 
-        number = max(_trials(directory), default=0) + 1
-        while True:
-            path = directory / f"essai-{number:04d}.json"
+        for number in count(max(_trials(directory), default=0) + 1):
+            stem = f"essai-{number:04d}"
+            reservation = directory / f".{stem}.lock"
             try:
+                reservation.mkdir()
+            except FileExistsError:
+                continue
+            try:
+                # Deux sauvegardes peuvent viser le même numéro avec des noms différents.
+                if (directory / f"{stem}.json").exists() or any(directory.glob(f"{stem}-*.json")):
+                    continue
+                path = directory / f"{stem}{suffix}.json"
                 # Sous Windows, rename échoue si la destination existe. Sous POSIX, le lien offre cette garantie.
                 if os.name == "nt":
                     temporary.rename(path)
                 else:
                     path.hardlink_to(temporary)
+                return number, path
             except FileExistsError:
-                number += 1
                 continue
-            return number, path
+            finally:
+                reservation.rmdir()
     finally:
         temporary.unlink(missing_ok=True)
 
