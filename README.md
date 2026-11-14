@@ -4,7 +4,7 @@ Le simulateur sert à comparer des stratégies de match, à entraîner un résea
 
 ## Lancer le simulateur
 
-Depuis le dossier du projet, avec Python 3.12 et Tkinter :
+Depuis le dossier du projet, avec Python 3.12 et Tkinter. Pour un nouveau clone, prépare d’abord [l’image du tapis](#source-du-tapis).
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -92,7 +92,7 @@ Les tests avancent le même moteur qu’utilise la fenêtre. Ils vérifient le d
 
 ### 4. Match automatique et replay
 
-**Implémentée, à valider.**
+**Validée.**
 
 - Après chaque dépôt, comparer les prochaines prises et les positions de dépôt qui rapportent des points. Choisir le meilleur gain estimé par seconde en comptant le pivot, les trajets et le dégagement. Le robot garde le même cap pendant le transport. Il essaie des trajets directs ou avec un point intermédiaire.
 - Jouer 100 secondes simulées avec la physique du mode manuel. Le fichier de chaque essai conserve le score et les poses affichées par le replay.
@@ -102,9 +102,7 @@ Le 14 novembre 2026, l’essai 1 a terminé à **43 points** avec le robot du d�
 
 ### 5. Premier réseau de neurones
 
-- Fournir au réseau la pose du robot, le temps restant, les positions et orientations connues des pierres, le chargement et les constructions déjà présentes. Lui proposer les actions réalisables, avec une estimation de leur durée et des points qu’elles peuvent rapporter.
-- Entraîner le réseau à maximiser le score à 100 secondes. Comparer ses choix à ceux de la stratégie de référence sur les mêmes scénarios.
-- **Validation.** Tester deux emplacements de mur qui rapportent autant. L’un est plus rapide à atteindre, l’autre dégage l’accès à une future porte. Vérifier si le réseau adapte son choix au temps restant.
+**À concevoir.** Le réseau devra pouvoir enchaîner les prises jusqu’à la capacité réelle du robot, choisir quelle pile relâcher et proposer un dépôt par ses coordonnées et son orientation. Le moteur devra valider la pose et le trajet avec toutes les piles transportées. La comparaison utilisera le score à 100 secondes sur les mêmes scénarios que la stratégie de référence.
 
 ### 6. Duels contre des robots holonomes et différentiels
 
@@ -126,10 +124,11 @@ Le 14 novembre 2026, l’essai 1 a terminé à **43 points** avec le robot du d�
 
 ## Source du tapis
 
-L’image locale `assets/tapis_2027.png` permet d’afficher le plan officiel hors ligne. Elle est obtenue à partir de `table_FINALE_1.0.pdf` dans [l’archive du tapis Eurobot 2027](https://www.eurobot.org/wp-content/uploads/2026/10/playmat.zip) publiée sur la [page officielle](https://www.eurobot.org/eurobot-contest/eurobot-2027/). Les dimensions et les bordures suivent le [règlement de jeu, § D.2 et G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf).
+L’image du tapis se prépare localement pour le pilotage manuel et la lecture des replays. Télécharge l’archive officielle et extrais `table_FINALE_1.0.pdf` à la racine du projet. Les dimensions et les bordures suivent le règlement de jeu, § D.2 et G.1. [Archive du tapis Eurobot 2027](https://www.eurobot.org/wp-content/uploads/2026/10/playmat.zip) · [Règlement de jeu](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
 
-Pour régénérer l’image avec Poppler après extraction du PDF :
+Utilise Poppler pour générer `assets/tapis_2027.png` après extraction du PDF.
 
 ```powershell
+New-Item -ItemType Directory -Force assets | Out-Null
 pdftoppm -singlefile -scale-to-x 900 -scale-to-y 600 -png table_FINALE_1.0.pdf assets/tapis_2027
 ```

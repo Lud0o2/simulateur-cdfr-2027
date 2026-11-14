@@ -1,5 +1,9 @@
 # Règles du simulateur CDFR 2027
 
+## Branches des étapes
+
+- Avant de commencer une étape, créer `codex/etape-N` depuis `main`. Faire les modifications et les vérifications sur cette branche, puis avancer `main` après validation de l’utilisateur. Conserver la branche de chaque étape validée comme point de reprise.
+
 ## Architecture
 
 - `src/simulateur.py` contient l’état du match et la physique Pymunk. Le pilotage manuel, les tests et le futur entraînement utilisent le même moteur. Le moteur doit pouvoir être importé et avancé sans fenêtre, sans chargement du tapis et sans attente en temps réel.
