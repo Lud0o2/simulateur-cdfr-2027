@@ -2,37 +2,59 @@
 
 Le simulateur sert à comparer des stratégies de match, à entraîner un réseau de neurones contre plusieurs adversaires et à préparer son utilisation sur le robot réel. Le réseau choisira des actions comme « prendre cette pile » ou « déposer une porte dans ce rempart ». Le système de déplacement et les actionneurs exécuteront ces actions.
 
-## Lancer l’étape 1
+## Lancer le simulateur
 
 Depuis le dossier du projet, avec Python 3.12 et Tkinter :
 
 ```powershell
-python simulateur.py
+python -m pip install -r requirements.txt
+python -B -m src.interface
 ```
 
 - Clique sur le tapis pour fixer la destination du centre du robot. Les flèches permettent un déplacement de 100 mm.
-- Le robot avance en ligne droite en conservant son orientation. Le trait sur le châssis indique l’avant. « Trajet bloqué » s’affiche quand le déplacement s’arrête à un obstacle.
-- Appuie sur **Q** pour pivoter à gauche ou sur **D** pour pivoter à droite, par pas de **15°**. Une commande de rotation interrompt le trajet en cours. Si le triangle rencontre un obstacle pendant le pivot, il garde son cap et affiche « Rotation bloquée ».
+- Le robot avance en ligne droite en conservant son orientation. La flèche sur le châssis indique l’avant. « Trajet bloqué » s’affiche quand le déplacement s’arrête à un obstacle.
+- Appuie sur **Q** pour pivoter à gauche ou sur **D** pour pivoter à droite, par pas de **15°**. Une commande de rotation interrompt le trajet en cours. Le robot peut écarter une pile libre en pivotant. Si une bordure, un obstacle fixe ou une pile coincée bloque le pivot, le simulateur affiche « Rotation bloquée ».
 - En gardant Q, D ou une flèche enfoncée, la commande se répète après **120 ms**, puis toutes les **60 ms**.
-- « Replacer au départ » remet le robot dans la salle du trône jaune.
+- Appuie sur la touche associée à la ventouse ou clique sur son repère numéroté. Le repère est **gris** quand la ventouse est coupée et **orange** quand elle est active, même si elle tient une pile. Répète la commande pour couper la ventouse et lâcher la pile.
+- **Reset match** remet le robot dans la salle du trône jaune, replace les piles, coupe les ventouses et remet le temps à zéro.
 
-Le châssis provisoire est un triangle équilatéral de 380 mm. Sa vitesse de déplacement est de 1 000 mm/s. Les coordonnées vont de gauche à droite et de haut en bas, en millimètres depuis le coin supérieur gauche du tapis.
+Le châssis provisoire défini dans `RobotRobotronik.toml` est un triangle équilatéral de 380 mm avec deux ventouses à l’avant et une sur chaque autre face. L’ordre des ventouses dans le fichier donne leurs numéros. La vitesse du robot est de 1 000 mm/s. Les coordonnées de la table vont de gauche à droite et de haut en bas, en millimètres depuis le coin supérieur gauche du tapis.
 
-Sur la table 2027 vide, les bordures extérieures constituent les obstacles physiques fixes. Les dessins des remparts, tours, douves et ponts sont des zones du tapis. Les piles de pierres de la figure 2 seront ajoutées avec les éléments mobiles à l’étape 2. Le moteur accepte aussi des rectangles fixes pour les scénarios de test.
+La table contient dix piles de trois pierres aux emplacements officiels. Chaque pile est un corps rigide de 320 × 110 mm vu du dessus. Une poussée centrée la fait glisser. Une poussée décentrée peut aussi la faire pivoter, selon le point de contact. Les piles se repoussent et ralentissent sous l’effet du frottement. Le robot s’arrête si la poussée se retrouve bloquée par une bordure ou un obstacle fixe. Les dessins des remparts, tours, douves et ponts sont imprimés sur le tapis. [Règlement Eurobot 2027, § D.4 et G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
+
+Une ventouse active prend les trois pierres d’un coup si elle arrive à **5 mm** d’un grand côté et que les faces sont alignées à **20°** près. La prise peut être décentrée et ne redresse pas la pile. La pile reste solidaire du châssis : son encombrement compte dans les collisions.
+
+La physique tourne à pas fixe avec Pymunk. Les coefficients de frottement et l’effort du robot, en poussée et en pivot, sont provisoires en attendant des mesures sur la table.
+
+## Modifier le robot
+
+Édite [`RobotRobotronik.toml`](RobotRobotronik.toml), puis relance le simulateur. Le fichier fournit la géométrie au moteur et à l’interface.
+
+- `contour_mm` contient les sommets du châssis, mesurés depuis son centre de rotation. Suis l’ordre du périmètre dans l’un ou l’autre sens. Le contour doit être convexe, sans sommets alignés, et tenir sur le tapis à la position de départ.
+- Chaque bloc `[[ventouses]]` définit une ventouse. `position_mm` donne sa position dans le même repère que le contour. `angle_deg` indique vers où elle pointe. L’axe X positif et l’angle 0° pointent vers l’avant. L’axe Y positif et l’angle 90° pointent vers le bas du tapis lorsque le robot est à son cap initial.
+- Ajoute, déplace ou supprime des blocs pour changer l’équipement. Leur ordre donne les numéros. Les touches **1 à 9** pilotent les neuf premières ventouses et **0** pilote la dixième. Toutes sont cliquables. Par défaut, **1** et **4** sont à l’avant, à 70 mm de part et d’autre du milieu de la face. **2** et **3** sont sur les côtés.
+
+## Architecture
+
+- `src/simulateur.py` contient le moteur de simulation, utilisable sans fenêtre.
+- `src/interface.py` contient l’interface Tkinter et le pilotage manuel.
+- `test/` contient les tests du moteur.
+- `assets/` contient l’image du tapis.
+- `include/` est réservé aux en-têtes natifs si le projet en a besoin.
 
 ## Vérifier
 
 ```powershell
-python -B -m unittest -v
+python -B -m unittest discover -s test -v
 ```
 
-Les tests avancent le même moteur qu’utilise la fenêtre. Ils vérifient le déplacement latéral, l’emprise du triangle aux bordures, le contact avec un rectangle fixe, le changement de destination et les collisions pendant la rotation.
+Les tests avancent le même moteur qu’utilise la fenêtre. Ils vérifient le déplacement, les collisions, les poussées, la prise et le relâchement, les collisions avec une pile tenue et la réinitialisation.
 
 ## Feuille de route
 
-L’étape 1 est disponible. Les étapes 2 à 8 décrivent le travail prévu et le résultat attendu pour chacune.
-
 ### 1. Terrain et déplacement manuel
+
+**Validée.**
 
 - Afficher le tapis officiel à l’échelle de la table de 3 000 × 2 000 mm. Piloter le robot holonome de 380 mm de côté au clic et régler son cap avec Q et D. Le centre rejoint la cible en ligne droite en gardant le cap choisi.
 - Calculer le premier contact sur tout le trajet, avec l’emprise du triangle. Le moteur peut avancer directement en temps simulé pour jouer sans fenêtre.
@@ -40,11 +62,15 @@ L’étape 1 est disponible. Les étapes 2 à 8 décrivent le travail prévu et 
 
 ### 2. Piles de pierres et prise par le grand côté
 
-- Placer les piles aux emplacements du plan officiel. Suivre le centre et l’orientation des piles dans le simulateur, comme le fera le mât sur la table réelle.
-- Approcher une pile par l’un de ses deux grands côtés. Quand le robot est face au bon côté et à portée, il prend les trois pierres d’un coup. La prise a une durée. En transport, la pile est fixe par rapport au châssis et son encombrement compte dans les collisions.
-- **Validation.** Prendre une pile à la main, vérifier qu’une approche par le petit côté échoue et qu’un passage franchissable à vide peut bloquer le robot chargé.
+**Étape en cours, presque validée.** Le placement, la poussée, la prise et le relâchement fonctionnent. Il reste à confirmer la prise en pilotage manuel avant de passer à l’étape 3.
+
+- Placer les piles selon le plan officiel, gérer leur poussée et rétablir leur position au reset. La position et l’orientation sont connues dans le simulateur, comme elles le seront grâce au mât sur la table réelle.
+- Approcher une pile par l’un de ses deux grands côtés avec la ventouse correspondante activée. La prise est instantanée pour cet essai. Sa durée sera calibrée sur le robot réel. En transport, la pile est fixe par rapport au châssis et son encombrement compte dans les collisions.
+- **Essai manuel.** Sans tourner, place le robot à **Y ≈ 500 mm**, active la ventouse **1** et avance vers la pile centrale. Fais pivoter le robot avec la pile, vérifie que le repère reste orange, puis appuie de nouveau sur **1** pour la lâcher. **Reset match** doit replacer toutes les piles et remettre les repères au gris.
 
 ### 3. Constructions, choix de pose et score
+
+**À venir après la validation de l’étape 2.**
 
 - Avec une pile, le robot peut déposer les trois pierres empilées en mur, les transformer en porte et déposer l’ensemble en un geste, ou redresser et déposer une tour à la fois en gardant les autres pierres. La transformation et la pose de la porte prennent plus de temps que la pose d’une tour.
 - Générer plusieurs positions et orientations par zone de construction. Calculer la pose du châssis nécessaire pour chaque dépôt et vérifier qu’il peut approcher avec sa charge, déposer et repartir. Inclure des poses où une partie des pierres dépasse de la zone.
@@ -83,10 +109,10 @@ L’étape 1 est disponible. Les étapes 2 à 8 décrivent le travail prévu et 
 
 ## Source du tapis
 
-L’image locale `tapis_2027.png` permet d’afficher le plan officiel hors ligne. Elle est obtenue à partir de `table_FINALE_1.0.pdf` dans [l’archive du tapis Eurobot 2027](https://www.eurobot.org/wp-content/uploads/2026/10/playmat.zip) publiée sur la [page officielle](https://www.eurobot.org/eurobot-contest/eurobot-2027/). Les dimensions et les bordures suivent le [règlement de jeu, § D.2 et G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf).
+L’image locale `assets/tapis_2027.png` permet d’afficher le plan officiel hors ligne. Elle est obtenue à partir de `table_FINALE_1.0.pdf` dans [l’archive du tapis Eurobot 2027](https://www.eurobot.org/wp-content/uploads/2026/10/playmat.zip) publiée sur la [page officielle](https://www.eurobot.org/eurobot-contest/eurobot-2027/). Les dimensions et les bordures suivent le [règlement de jeu, § D.2 et G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf).
 
 Pour régénérer l’image avec Poppler après extraction du PDF :
 
 ```powershell
-pdftoppm -singlefile -scale-to-x 900 -scale-to-y 600 -png table_FINALE_1.0.pdf tapis_2027
+pdftoppm -singlefile -scale-to-x 900 -scale-to-y 600 -png table_FINALE_1.0.pdf assets/tapis_2027
 ```

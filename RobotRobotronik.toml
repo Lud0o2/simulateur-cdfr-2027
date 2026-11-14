@@ -1,0 +1,24 @@
+# Repère du robot en mm : +X vers l’avant, +Y vers le bas à l’orientation initiale.
+# Indiquer les sommets du contour convexe dans l’ordre du périmètre.
+contour_mm = [
+    [-219.39310229205776, 0],
+    [109.69655114602888, -190],
+    [109.69655114602888, 190],
+]
+
+# L’ordre des blocs donne les numéros. À 0°, la ventouse pointe vers l’avant.
+[[ventouses]] # 1 — avant, côté -Y
+position_mm = [109.69655114602888, -100]
+angle_deg = 0
+
+[[ventouses]] # 2 — côté +Y
+position_mm = [-54.84827557301444, 95]
+angle_deg = 120
+
+[[ventouses]] # 3 — côté -Y
+position_mm = [-54.84827557301444, -95]
+angle_deg = -120
+
+[[ventouses]] # 4 — avant, côté +Y
+position_mm = [109.69655114602888, 100]
+angle_deg = 0
