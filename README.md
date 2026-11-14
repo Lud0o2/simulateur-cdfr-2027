@@ -104,6 +104,9 @@ Le 14 novembre 2026, l’essai 1 a terminé à **43 points** avec le robot du d�
 
 **À concevoir.** Le réseau devra pouvoir enchaîner les prises jusqu’à la capacité réelle du robot, choisir quelle pile relâcher et proposer un dépôt par ses coordonnées et son orientation. Le moteur devra valider la pose et le trajet avec toutes les piles transportées. La comparaison utilisera le score à 100 secondes sur les mêmes scénarios que la stratégie de référence.
 
+- Le test du moteur vérifie que le robot peut prendre deux piles avec deux ventouses, marquer 8 points en déposant la seconde dans un rempart, puis repartir avec la première.
+- Pour les futures actions du réseau, les dépôts sont réservés aux zones de construction. Une pile reste en charge jusqu’à un dépôt en zone.
+
 ### 6. Duels contre des robots holonomes et différentiels
 
 - Faire circuler les deux robots sur la même table et la même horloge. L’holonome peut se déplacer latéralement. Le différentiel doit suivre une trajectoire compatible avec ses roues et s’aligner pour la prise.

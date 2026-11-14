@@ -242,6 +242,45 @@ class SimulationTest(unittest.TestCase):
                 self.assertFalse(sim.suction_cups[number - 1].enabled)
                 self.assertAlmostEqual(dist(sim.blocks[0].position, carried.position), 0)
 
+    def test_drops_the_second_pile_in_zone_and_leaves_with_the_first(self):
+        robot = RobotGeometry(FOOTPRINT, (
+            ((FRONT, -100), Vec2d(1, 0)),
+            ((FRONT, 100), Vec2d(1, 0)),
+        ))
+        sim = Simulation(blocks=((1445, 440, 1555, 760), (1445, 1040, 1555, 1360)), robot=robot)
+        pickup_x = 1445 - FRONT - 2
+
+        sim.move_to(250, 800)
+        sim.advance(1)
+        sim.move_to(pickup_x, 800)
+        sim.advance(2)
+        sim.toggle_suction(1)
+        self.assertEqual(sim.held_pile(1), 0)
+
+        sim.move_to(pickup_x, 1000)
+        sim.advance(1)
+        sim.toggle_suction(2)
+        self.assertEqual((sim.held_pile(1), sim.held_pile(2)), (0, 1))
+
+        # Place le centre de la seconde pile dans le rempart, avec les deux piles encore tenues.
+        sim.move_to(pickup_x - (1500 - 850), 1000)
+        sim.advance(1)
+        self.assertAlmostEqual(dist(sim.blocks[1].position, (850, 1200)), 0)
+        self.assertEqual(sim.score, 0)
+        sim.toggle_suction(2)
+        self.assertEqual((sim.held_pile(1), sim.held_pile(2)), (0, None))
+        self.assertEqual(sim.score, 8)
+
+        first_offset = Vec2d(*sim.blocks[0].position) - Vec2d(*sim.position)
+        deposited = sim.blocks[1]
+        sim.move_to(*START)
+        sim.advance(1)
+        self.assertEqual(sim.position, START)
+        self.assertEqual((sim.held_pile(1), sim.held_pile(2)), (0, None))
+        self.assertAlmostEqual(dist(sim.blocks[0].position, Vec2d(*START) + first_offset), 0)
+        self.assertEqual(sim.blocks[1], deposited)
+        self.assertEqual(sim.score, 8)
+
     def test_cup_does_not_grab_the_short_side(self):
         sim = reference_simulation(blocks=((650, 945, 970, 1055),))
         initial = sim.blocks
