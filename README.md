@@ -19,11 +19,19 @@ Le simulateur compare des stratégies de match et entraîne un réseau de neuron
 
 ## Commandes principales
 
-**Ouvrir le dernier replay**
+Depuis la racine du dépôt, installe les dépendances Python. Pour le pilotage manuel et les replays, prépare aussi [l’image du tapis](#source-du-tapis).
 
 ```powershell
-python -B -m src.match replay
+python -m pip install -r requirements.txt
 ```
+
+**Ouvrir le replay de référence de l’étape 5**
+
+```powershell
+python -B -m src.match replay 49
+```
+
+Omet le numéro pour ouvrir le dernier replay enregistré.
 
 **Reprendre les poids sauvegardés et jouer 100 matchs d’entraînement**
 
@@ -31,7 +39,7 @@ python -B -m src.match replay
 python -B -m src.reseau train --resume --matches 100
 ```
 
-Pour créer les premiers poids, lance `python -B -m src.reseau train`.
+Pour entraîner un nouveau réseau dans un fichier distinct, choisis un nom de fichier encore libre avec `python -B -m src.reseau --model reseau-nouveau.npz train`.
 
 **Tester aussi des positions et des angles de dépôt**
 
@@ -41,10 +49,9 @@ python -B -m src.reseau train --resume --matches 100 --mutate-deposits
 
 ## Lancer le simulateur
 
-Depuis le dossier du projet, avec Python 3.12 et Tkinter. Pour un nouveau clone, prépare d’abord [l’image du tapis](#source-du-tapis).
+Utilise Python 3.12 avec Tkinter. Une fois [les dépendances installées](#commandes-principales) et [le tapis préparé](#source-du-tapis), lance le pilotage manuel.
 
 ```powershell
-python -m pip install -r requirements.txt
 python -B -m src.interface
 ```
 
