@@ -11,7 +11,7 @@ import numpy as np
 from pymunk import Vec2d
 
 from src.match import (
-    ALIGNED_ANGLES, ALTERNATE_DROPS, CENTERED_DROPS, MATCH_SECONDS, Replay, _action_state, _approach, _clear,
+    ALIGNED_ANGLES, ALTERNATE_DROPS, CENTERED_DROPS, MATCH_SECONDS, ROUTE_MARGIN, Replay, _action_state, _approach, _clear,
     _drop_approach, _follow, _pickup_approach, _route, place_pile, play_match, save_replay, take_pile,
 )
 from src.reseau import (
@@ -343,7 +343,7 @@ class TrainingReplayTest(unittest.TestCase):
     def test_demonstration_can_resume_loading_after_a_deposit(self):
         actions = {"prises": [[1, 2], [9, 3]], "depots": [[2, 1, 0], [3, 3, 180]], "tournees": [1, 1]}
         replay = play_match(Simulation(), policy=_ReplayDemonstration(actions))
-        examples = _replay_examples({**replay, **actions})
+        examples = _replay_examples({**replay, **actions, "duree": replay["duree"] + 1})
         self.assertEqual([row[index, 79] for row, index in examples], [1, -1, 0, 1, -1, 0, -1])
         self.assertEqual(replay["score"], 26)
 
@@ -398,7 +398,7 @@ class TrainingReplayTest(unittest.TestCase):
         self.assertAlmostEqual(row[78], 1 / 5)
         np.testing.assert_array_equal(row[80:], 0)
 
-    def test_action_distance_uses_the_planned_segments_for_pickup_and_deposit(self):
+    def test_action_distance_uses_the_pickup_path_and_the_drop_destination(self):
         sim = reference_simulation(((800, 700, 950, 1300),), blocks=((1445, 840, 1555, 1160),))
         state = _action_state(sim)
         plan = _pickup_approach(sim, sim.blocks[0], 1, state)
@@ -411,8 +411,7 @@ class TrainingReplayTest(unittest.TestCase):
         site = Vec2d(250, 400)
         state = _action_state(sim)
         plan = _drop_approach(sim.blocks[0], site, 0, state)
-        path = (state[0], *plan.before, *plan.after)
-        expected = sum(dist(a, b) for a, b in zip(path, path[1:]))
+        expected = dist(state[0], (plan.after or plan.before)[-1])
         rows = features(sim, {1: 0}, [(8, 1, 1, site, 0), (0, 1, 1, Vec2d(1500, 1000), 0)], pickup=False)
         self.assertAlmostEqual(rows[0, ACTION_DISTANCE], expected / TABLE_DIAGONAL)
         self.assertEqual(rows[1, ACTION_DISTANCE], -1)
@@ -961,6 +960,21 @@ class AutomaticMatchTest(unittest.TestCase):
         self.assertAlmostEqual(duration, sum(travel_time(a.get_distance(b)) for a, b in zip(nodes, nodes[1:])))
         self.assertEqual(_route(start, end, footprints, obstacles, duration - 0.01), ((), 0))
         self.assertEqual(_route(start, end, footprints, ())[0], (end,))
+
+    def test_route_uses_nearby_corners_and_keeps_clearance_from_a_pile(self):
+        start, end = Vec2d(1200, 200), Vec2d(2000, 200)
+        footprints = (rectangle_corners((-30, -20, 30, 20)),)
+        pile = (1450, 140, 1770, 225)
+        obstacles = ((rectangle_corners(pile), pile),)
+        path, duration = _route(start, end, footprints, obstacles)
+        self.assertEqual(path[-1], end)
+        self.assertEqual(len(path), 2)
+        self.assertLess(sum(dist(a, b) for a, b in zip((start, *path), path)), 850)
+        expanded = (pile[0] - ROUTE_MARGIN, pile[1] - ROUTE_MARGIN,
+                    pile[2] + ROUTE_MARGIN, pile[3] + ROUTE_MARGIN)
+        self.assertTrue(all(_clear(a, b, footprints, ((rectangle_corners(expanded), expanded),))
+                            for a, b in zip((start, *path), path)))
+        self.assertLess(duration, 2.6)
 
     def test_official_table_deposits_both_piles_carried_on_the_front_face(self):
         simulation = Simulation()

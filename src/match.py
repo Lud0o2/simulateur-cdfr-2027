@@ -159,14 +159,29 @@ def _visibility(footprints, obstacles, margin):
 @lru_cache(maxsize=256)
 def _obstacle_waypoints(footprints, obstacles):
     points = []
+    gap = ROUTE_MARGIN + 1
     for footprint in footprints:
         left, top, right, bottom = _bounds(footprint)
         for _, (x1, y1, x2, y2) in obstacles:
             # Coins du rectangle interdit au centre du châssis par cette paire de contours.
-            gap = ROUTE_MARGIN + 1
             blocked = (x1 - right - gap, y1 - bottom - gap, x2 - left + gap, y2 - top + gap)
             points.append((blocked, tuple(Vec2d(*point) for point in rectangle_corners(blocked))))
     return tuple(points)
+
+
+def _corner_bypasses(start, end, corners):
+    # Un seul point peut suffire pour passer du même côté des deux coins.
+    delta = end - start
+    for a, b in pairwise((*corners, corners[0])):
+        for first, second in ((a, b), (b, a)):
+            incoming, outgoing = first - start, second - end
+            cross = incoming.cross(outgoing)
+            if abs(cross) < CONTACT_GAP:
+                continue
+            along = delta.cross(outgoing) / cross
+            back = delta.cross(incoming) / cross
+            if along >= 1 and back >= 1:
+                yield start + along * incoming
 
 
 # Les empreintes et les obstacles font partie de la clé, y compris après un déplacement de pile.
@@ -183,37 +198,42 @@ def _route(start, end, footprints, obstacles, limit=float("inf")):
         exact = _visibility(footprints, obstacles, 0)
         if not exact(start, start) or not exact(end, end):
             return (), 0
-        # Les gestes serrés peuvent entrer dans les derniers millimètres de marge.
+        # Autorise le premier ou dernier segment à rejoindre une pose de prise ou de dépôt serrée.
         close = {point for point in (start, end) if not visible(point, point)}
-        clear = visible
+        with_margin = visible
 
         def visible(a, b):
-            if a in close or b in close:
-                return exact(a, b)
-            return clear(a, b)
+            return exact(a, b) if a in close or b in close else with_margin(a, b)
 
         if visible(start, end):
             return (end,), direct
     left, right = sorted((start.x, end.x))
     top, bottom = sorted((start.y, end.y))
-    corners = (point for (x1, y1, x2, y2), points in _obstacle_waypoints(footprints, obstacles)
-               if left <= x2 and right >= x1 and top <= y2 and bottom >= y1
-               for point in points)
-    points = dict.fromkeys((Vec2d(start.x, end.y), Vec2d(end.x, start.y), *corners, *WAYPOINTS))
+    nearby = [corners for (x1, y1, x2, y2), corners in _obstacle_waypoints(footprints, obstacles)
+              if left <= x2 and right >= x1 and top <= y2 and bottom >= y1]
+    points = dict.fromkeys((Vec2d(start.x, end.y), Vec2d(end.x, start.y), *WAYPOINTS))
+    for corners in nearby:
+        points.update(dict.fromkeys(corners))
+    if len(nearby) == 1:
+        points.update(dict.fromkeys(_corner_bypasses(start, end, nearby[0])))
     remaining = {end: 0.0}
     start_times = {}
     best = {start: 0.0}
     infinity = float("inf")
     # Un détour court donne une borne pour éviter de développer les branches plus lentes.
-    ranked = sorted((_segment_time(start, point) + _segment_time(point, end), point)
-                    for point in points if point != start and point != end)
-    for duration, target in ranked:
+    ranked = []
+    for point in points:
+        if point == start or point == end:
+            continue
+        first, tail = _segment_time(start, point), _segment_time(point, end)
+        if first + tail <= limit + CONTACT_GAP:
+            ranked.append((first + tail, first, tail, point))
+    for duration, first, tail, target in sorted(ranked):
         if duration > limit:
             break
         if not visible(target, target):
             continue
-        start_times[target] = _segment_time(start, target)
-        remaining[target] = _segment_time(target, end)
+        start_times[target], remaining[target] = first, tail
         if visible(start, target) and visible(target, end):
             limit = duration
     pending = [(direct, 0.0, start, ())]
@@ -265,6 +285,10 @@ def _pivot_clear(position, footprints, angle, polygons):
 @lru_cache(maxsize=4096)
 def _approach(start, end, angle, footprints, obstacles) -> Approach | None:
     """Cherche un trajet avec une rotation en roulant ou un pivot dans un espace libre."""
+    if not angle:
+        path, duration = _route(start, end, footprints, obstacles)
+        return Approach(duration, (), 0, path) if path else None
+
     polygons = tuple(corners for corners, _ in obstacles)
     rotated = tuple(tuple(Vec2d(*corner).rotated(angle) for corner in shape) for shape in footprints)
     if not _clear(end, end, rotated, obstacles):
@@ -284,19 +308,24 @@ def _approach(start, end, angle, footprints, obstacles) -> Approach | None:
                     and _visibility(rotated, obstacles, ROUTE_MARGIN)(turning_end, end)):
                 return Approach(travel_time(distance), (end,), angle, (), rolling=True)
     # shortcut: un seul changement de cap par trajet, à étendre pour les passages plus étroits.
-    pivots = (start,)
-    if angle:
-        along = tuple(start + (end - start) * fraction for fraction in (0.25, 0.5, 0.75))
-        pivots = (start, end, *along, OPEN_SPACE, *WAYPOINTS)
+    along = tuple(start + (end - start) * fraction for fraction in (0.25, 0.5, 0.75))
+    if 0 < start.get_distance(end) < 150:
+        normal = (end - start).perpendicular().normalized()
+        middle = (start + end) / 2
+        along += tuple(middle + normal * shift for shift in (40, -40, 80, -80))
+    pivots = (start, end, *along, OPEN_SPACE, *WAYPOINTS)
     pivots = [(_segment_time(start, pivot), _segment_time(pivot, end), pivot)
               for pivot in dict.fromkeys(pivots)]
+    clear_before = _visibility(footprints, obstacles, 0)
+    clear_after = _visibility(rotated, obstacles, 0)
     for first_direct, last, pivot in sorted(pivots, key=lambda p: p[0] + p[1]):
         remaining = best.duration - turn_time if best else float("inf")
         # Une petite marge protège les départages aux erreurs d'arrondi.
         limit = remaining + CONTACT_GAP
         if first_direct + last > limit:
             break
-        if angle and not _pivot_clear(pivot, footprints, angle, polygons):
+        if (not clear_before(pivot, pivot) or not clear_after(pivot, pivot)
+                or not _pivot_clear(pivot, footprints, angle, polygons)):
             continue
         before, first = _route(start, pivot, footprints, obstacles, limit - last)
         if not before:
@@ -453,14 +482,19 @@ def _drop_retreat(simulation, cup, *, advance=None, deadline=None):
             advance=advance, deadline=deadline)
 
 
-def _drop_approach(block, destination, angle, state):
-    start, footprints, obstacles = state
+def _drop_target(block, destination, angle, start):
     center = Vec2d(*block.position)
     turn = remainder(remainder(angle, 2 * pi) - block.angle, 2 * pi)
+    return destination - (center - start).rotated(turn), turn
+
+
+def _drop_approach(block, destination, angle, state):
+    start, footprints, obstacles = state
+    end, turn = _drop_target(block, destination, angle, start)
+    center = Vec2d(*block.position)
     corners = tuple(tuple(destination + (Vec2d(*corner) - center).rotated(turn)) for corner in block.corners)
     if not _wall_drop_zones(Block(tuple(destination), block.angle + turn, corners))[1]:
         return None
-    end = destination - (center - start).rotated(turn)
     return _approach(start, end, turn, footprints, obstacles)
 
 
