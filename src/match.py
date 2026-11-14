@@ -401,11 +401,13 @@ def take_pile(simulation: Simulation, pile: int, cup: int, *, advance=None, dead
     return pickup is not None and _take_pickup(simulation, pile, cup, pickup, advance=advance, deadline=deadline)
 
 
-def _take_pickup(simulation, pile, cup, pickup, *, advance=None, deadline=None):
+def _take_pickup(simulation, pile, cup, pickup, *, advance=None, deadline=None, on_grip=None):
     if not _follow(simulation, pickup.approach, advance=advance, deadline=deadline):
         return False
     if not simulation.grip_pile(cup, pile):
         return False
+    if on_grip is not None:
+        on_grip(simulation.time)
     start, footprints, obstacles = _action_state(simulation)
     end = _stroke_end(start, pickup.end - start, footprints, obstacles)
     # La pile est déjà saisie, même si le temps restant ou un obstacle abrège la course.
@@ -632,7 +634,7 @@ def _frame(simulation, label):
     }
 
 
-def _play_batches(simulation, record, policy, drop_poses, multiple_drops):
+def _play_batches(simulation, record, policy, drop_poses, multiple_drops, pickup_events):
     """Charge les ventouses disponibles et dépose les piles une par une."""
     def perform(action, label, **choice):
         def advance(seconds):
@@ -685,7 +687,7 @@ def _play_batches(simulation, record, policy, drop_poses, multiple_drops):
             _, index, cup = choice
 
             if not perform(_take_pickup, f"Prise pile {index + 1} · ventouse {cup}",
-                           pile=index, cup=cup, pickup=approaches[index, cup]):
+                           pile=index, cup=cup, pickup=approaches[index, cup], on_grip=pickup_events.append):
                 missed.add((index, cup))
                 continue
             if policy is not None:
@@ -738,6 +740,7 @@ def _play_batches(simulation, record, policy, drop_poses, multiple_drops):
                     record(f"{action} pile {index + 1} · ventouse {cup}")
 
                 def record_deposit():
+                    pickup_events.append(None)
                     record(f"Dépôt pile {index + 1} · {len(held) - 1} pile(s) en charge")
 
                 angles = (angle, angle + pi) if policy is None else (angle,)
@@ -804,6 +807,7 @@ def _return_home(simulation, record):
 def play_match(simulation: Simulation, *, batches=False, policy=None, record_frames=True):
     batches = batches or policy is not None
     frames = []
+    pickup_events = []
 
     def record(label, bonus=None):
         if not record_frames:
@@ -830,15 +834,18 @@ def play_match(simulation: Simulation, *, batches=False, policy=None, record_fra
         drop_poses = _shifted_drops(offsets, angles) if offsets else CENTERED_DROPS
         if multiple_drops:
             drop_poses = tuple(dict.fromkeys((*drop_poses, *ALTERNATE_DROPS)))
-        _play_batches(simulation, record, policy, drop_poses, multiple_drops)
+        _play_batches(simulation, record, policy, drop_poses, multiple_drops, pickup_events)
     else:
-        _play_reference(simulation, record)
+        _play_reference(simulation, record, pickup_events)
 
     _return_home(simulation, record)
     bonus = simulation.return_score
     record(f"Fin du match · Retour +{bonus}" if bonus else "Fin du match", bonus)
+    # Un dépôt (None) coupe la suite de prises.
+    pickup_gap = sum(end - start for start, end in pairwise(pickup_events) if start is not None and end is not None)
     replay = {"obstacles": simulation.obstacles, "frames": frames,
-              "score": simulation.score + bonus, "score_retour": bonus, "duree": round(simulation.time, 6)}
+              "score": simulation.score + bonus, "score_retour": bonus, "duree": round(simulation.time, 6),
+              "temps_entre_prises": round(pickup_gap, 6)}
     if offsets and any(dx or dy for dx, dy in offsets):
         replay["decalages_depot_mm"] = offsets
     if any(angles):
@@ -846,7 +853,7 @@ def play_match(simulation: Simulation, *, batches=False, policy=None, record_fra
     return replay
 
 
-def _play_reference(simulation, record):
+def _play_reference(simulation, record, pickup_events):
     def advance(label):
         record(label)
         simulation.advance(min(FRAME_STEP, BUILD_DEADLINE - simulation.time))
@@ -871,7 +878,7 @@ def _play_reference(simulation, record):
             record(f"{action} de la {name}")
 
         if not _take_pickup(simulation, plan.pile, plan.cup, plan.pickup,
-                            advance=approach_step, deadline=BUILD_DEADLINE):
+                            advance=approach_step, deadline=BUILD_DEADLINE, on_grip=pickup_events.append):
             unavailable.add(plan.pile)
             continue
         advance(f"Prise de la {name}")
@@ -879,6 +886,7 @@ def _play_reference(simulation, record):
         if simulation.time >= BUILD_DEADLINE:
             break
         simulation.toggle_suction(plan.cup)
+        pickup_events.append(None)
         advance(f"Dépôt de la {name}" if delivered else f"Transport bloqué · {name}")
         if delivered:
             def retreat_step(seconds):

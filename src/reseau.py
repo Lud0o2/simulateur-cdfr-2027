@@ -372,7 +372,7 @@ def _replay_examples(replay):
 def _learn_replay(network, replay):
     examples = _replay_examples(replay)
     best = network
-    best_rank = _replay_rank(play_match(Simulation(), policy=MatchPolicy(best), record_frames=False))
+    best_rank = _network_rank(play_match(Simulation(), policy=MatchPolicy(best), record_frames=False))
     offsets = _read_drop_offsets(replay.get("decalages_depot_mm", CENTERED_OFFSETS))
     angles = _read_drop_angles(replay.get("rotations_depot_rad", ALIGNED_ANGLES))
     for rate in (0.025, 0.05, 0.075):
@@ -382,12 +382,13 @@ def _learn_replay(network, replay):
         for steps in (64, 64, 128, 256, 512):
             candidate.imitate(examples, steps=steps, learning_rate=rate)
             result = play_match(Simulation(), policy=MatchPolicy(candidate), record_frames=False)
-            rank = _replay_rank(result)
+            rank = _network_rank(result)
             if rank > best_rank:
                 best, best_rank = deepcopy(candidate), rank
     final = play_match(Simulation(), policy=MatchPolicy(best))
-    if _replay_rank(final) != best_rank:
+    if _network_rank(final) != best_rank:
         raise ValueError("Le replay autonome ne reproduit pas la validation.")
+    final["score_selection"] = best_rank[0]
     if best is not network:
         best.matches_without_progress = 0
     return best, final
@@ -397,11 +398,17 @@ def _replay_rank(replay):
     return replay["score"], -replay["duree"]
 
 
+def _network_rank(replay):
+    points, negative_duration = _replay_rank(replay)
+    score = round(points - replay.get("temps_entre_prises", 0), 6)
+    return score, points, negative_duration
+
+
 def _validated_replay(network, rank, seed):
     replay = play_match(Simulation(), policy=MatchPolicy(network))
-    if _replay_rank(replay) != rank:
+    if _network_rank(replay) != rank:
         raise ValueError("Le replay du réseau ne reproduit pas son résultat de validation.")
-    replay.update(strategie="validation_reseau", graine=seed)
+    replay.update(strategie="validation_reseau", graine=seed, score_selection=rank[0])
     return replay
 
 
@@ -464,12 +471,14 @@ def _train_endless(seed, model, incumbent, *, resume, mutate_deposits):
             saved = " · poids sauvegardés"
         else:
             saved = ""
-        print(f"Record · série {series} · {rank[0]} points en {-rank[1]:.2f} s{saved}", flush=True)
+        selection, points, negative_duration = rank
+        print(f"Record · série {series} · {points} points en {-negative_duration:.2f} s · "
+              f"sélection {selection:.2f}{saved}", flush=True)
 
     try:
         if incumbent is not None:
             replay, _ = _simulate_match((incumbent, None, False, False, False))
-            best_rank = _replay_rank(replay)
+            best_rank = _network_rank(replay)
         with (ProcessPoolExecutor(max_workers=workers, initializer=signal.signal,
                                   initargs=(signal.SIGINT, signal.SIG_IGN)) if workers > 1 else nullcontext()) as pool:
             run_matches = pool.map if pool else map
@@ -562,7 +571,7 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, mutate_
         jobs = ((candidate._for_simulation(), None, False, False, False) for candidate in candidates)
         results = run_matches(_simulate_match, jobs)
         for candidate, (replay, _) in zip(candidates, results, strict=True):
-            rank = _replay_rank(replay)
+            rank = _network_rank(replay)
             if previous_rank is None:
                 previous_rank = rank
             if network_rank is None or rank > network_rank:
@@ -578,12 +587,20 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, mutate_
             if stalled == PROGRESS_WINDOW:
                 break
         else:
+            selection, points, negative_duration = network_rank
             print(f"Validation · génération {generation} · meilleur réseau "
-                  f"sans exploration {network_rank[0]} points en {-network_rank[1]:.2f} s · "
+                  f"sans exploration {points} points en {-negative_duration:.2f} s · sélection {selection:.2f} · "
                   f"record avec exploration {exploration_rank[0]} points en {-exploration_rank[1]:.2f} s", flush=True)
             if improved:
-                points = network_rank[0] - previous_rank[0]
-                gain = f"+{points} points" if points else f"{network_rank[1] - previous_rank[1]:.2f} s gagnées"
+                selection_gain = selection - previous_rank[0]
+                points_gain = points - previous_rank[1]
+                time_gain = negative_duration - previous_rank[2]
+                if points_gain:
+                    gain = f"{points_gain:+d} points"
+                elif time_gain > 0:
+                    gain = f"{time_gain:.2f} s gagnées"
+                else:
+                    gain = f"+{selection_gain:.2f} au score de sélection"
                 print(f"Progression · 100 % · nouveau record autonome · {gain}", flush=True)
             else:
                 progress = max(0, 100 * (PROGRESS_WINDOW - stalled) // PROGRESS_WINDOW)
@@ -596,7 +613,7 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, mutate_
     winner_replay = trained_replay
     if incumbent is not None and not resume:
         replay, _ = _simulate_match((incumbent, None, False, False, False))
-        rank = _replay_rank(replay)
+        rank = _network_rank(replay)
         if rank >= network_rank:
             network = incumbent
             winner_replay = _validated_replay(incumbent, rank, seed)
@@ -678,11 +695,13 @@ def main():
         reference = play_match(Simulation(), record_frames=False)
         replay = play_match(Simulation(), policy=MatchPolicy(network))
         score = replay["score"]
-        replay.update(strategie="reseau", score_reference=reference["score"])
+        selection = _network_rank(replay)[0]
+        replay.update(strategie="reseau", score_reference=reference["score"], score_selection=selection)
         number, path = save_replay(replay)
         print(f"Table officielle · étape 4 {reference['score']} points · réseau {score} points "
               f"(+{replay['score_retour']} au retour)")
         print(f"Durées simulées · étape 4 {reference['duree']:.2f} s · réseau {replay['duree']:.2f} s")
+        print(f"Sélection du réseau · {selection:.2f} · {replay['temps_entre_prises']:.2f} s entre prises consécutives")
         print(f"Replay de l’essai {number} · {path}")
         print(f"python -B -m src.match replay {number}", flush=True)
         completion_beep()
