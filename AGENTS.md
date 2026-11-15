@@ -10,6 +10,7 @@
 - `src/interface.py` gère le rendu Tkinter, les commandes manuelles et la conversion des pixels en millimètres. Les règles du jeu et les collisions appartiennent au moteur.
 - `RobotRobotronik.toml` définit le contour et les ventouses du robot. Utiliser cette géométrie pour les collisions, les prises et l’affichage, et déduire les commandes de la liste des ventouses.
 - `test/` contient les tests `unittest` et `assets/` les ressources d’affichage.
+- `docs/` décrit l’architecture et la structure pour les LLM. Mettre ces documents à jour avec le code. Le plan de modularisation est une proposition tant qu’il n’est pas implémenté.
 
 ## Simulation et vérification
 

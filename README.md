@@ -121,6 +121,7 @@ Le replay affiche les poses enregistrées, la cible du robot, l’action en cour
 - `src/reseau.py` entraîne et évalue le réseau.
 - `test/` contient les tests de simulation, de replay et d’entraînement.
 - `assets/` contient l’image du tapis.
+- `docs/` décrit l’architecture, la structure et le domaine pour les développeurs et les assistants LLM. Le plan de modularisation est dans [`docs/plan-modularisation.md`](docs/plan-modularisation.md).
 
 ## Vérifier
 
