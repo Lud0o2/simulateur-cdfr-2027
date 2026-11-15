@@ -24,6 +24,7 @@ from .reseaux.mlp import (
     Network, _learning_rate,
 )
 from .reseaux.mutation import _mutate_drop_pose
+from .recompenses.construction_temps import ConstructionTemps
 from .evaluation.metriques import _format_elapsed, _match_rank, _replay_rank
 from .selection.reseau import MatchPolicy
 from .strategies.poses import ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES
@@ -32,6 +33,7 @@ from .strategies.poses import ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES
 EXPLORATION_INTERVAL = 8
 PROGRESS_WINDOW = 50  # matchs d'entraînement sans nouveau record autonome
 MODEL = MODELE
+RECOMPENSE = ConstructionTemps()
 
 
 def _validated_replay(network, rank, seed):
@@ -181,8 +183,7 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
         ranked = sorted((match for match in matches if match[1]), key=lambda match: _replay_rank(match[0]), reverse=True)
         for index, (replay, history) in enumerate(ranked):
             # Le temps départage les scores égaux avec un bonus de 0 à 0,5 point.
-            time_bonus = 0.5 * (1 - replay["duree"] / MATCH_SECONDS)
-            current = [(row, (replay["score"] - score + time_bonus) / 8) for row, score in history]
+            current = [(row, RECOMPENSE.valeur_match(score, replay)) for row, score in history]
             examples.extend(current)
             # Le premier candidat apprend spécifiquement la meilleure trajectoire du lot.
             inputs, targets = zip(*(current if index == 0 else examples))

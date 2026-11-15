@@ -7,12 +7,14 @@ from .base import Transition
 class ConstructionTemps:
     id = "construction_temps"
 
+    def valeur_match(self, score_avant: float, replay) -> float:
+        duree = replay.get("duree", MATCH_SECONDS)
+        bonus = 0.5 * (1 - duree / MATCH_SECONDS)
+        return (replay["score"] - score_avant + bonus) / 8
+
     def valeur(self, transition: Transition) -> float:
         replay = transition.replay or {}
-        duree = replay.get("duree", MATCH_SECONDS)
-        score = replay.get("score", transition.apres.score)
-        bonus = 0.5 * (1 - duree / MATCH_SECONDS)
-        return (score - transition.avant.score + bonus) / 8
+        return self.valeur_match(transition.avant.score, replay)
 
     def rang(self, replay) -> tuple[float, float]:
         return replay["score"], -replay["duree"]
