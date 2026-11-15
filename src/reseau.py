@@ -410,18 +410,34 @@ def _train_endless(seed, model, incumbent, *, resume, learning_rate=None):
     saved_rank = None
     improved_at = None
     session_best = None
+    series_best = None
+    series_replays = {}
     series = 1
     seeds = np.random.SeedSequence(seed)
     workers = _training_workers(PROGRESS_WINDOW)
 
     def record(network, rank):
-        nonlocal saved_rank, improved_at, session_best
-        if session_best is None or rank > session_best[1]:
-            session_best = (network, rank, seed, series)
+        nonlocal saved_rank, improved_at, session_best, series_best
+        if series_best is None or rank > series_best[1]:
+            series_best = (network, rank)
+        if session_best is None or rank > session_best[0]:
+            session_best = rank, series
         if saved_rank is None or rank > saved_rank:
             network.save(model)
             saved_rank = rank
             improved_at = monotonic()
+
+    def save_series():
+        nonlocal series_best
+        if series_best is None:
+            return
+        network, rank = series_best
+        replay = _validated_replay(network, rank, seed)
+        replay.update(strategie="entrainement_endless", serie=series)
+        number, _ = save_replay(replay, descriptive=True)
+        series_replays[series] = number
+        series_best = None
+        print(f"Série {series} · {rank[0]} points en {-rank[1]:.2f} s · replay {number}", flush=True)
 
     def status(*, generation, played, batch, stalled):
         rank = saved_rank if saved_rank is not None else batch
@@ -447,18 +463,19 @@ def _train_endless(seed, model, incumbent, *, resume, learning_rate=None):
                 _train_matches(None, seed, starting_network, starting_network is not None,
                                workers, run_matches, on_record=record, on_generation=status,
                                learning_rate=learning_rate)
+                save_series()
                 series += 1
                 seed = int(seeds.spawn(1)[0].generate_state(1)[0])
                 starting_network = None
     except KeyboardInterrupt:
+        # La série interrompue garde aussi son meilleur résultat.
+        save_series()
         if session_best is None:
             print("Entraînement arrêté.", flush=True)
             return
-        network, rank, best_seed, best_series = session_best
-        replay = _validated_replay(network, rank, best_seed)
-        replay.update(strategie="entrainement_endless", serie=best_series)
-        number, _ = save_replay(replay, descriptive=True)
-        print(f"Session · {rank[0]} points en {-rank[1]:.2f} s · replay {number}", flush=True)
+        rank, best_series = session_best
+        print(f"Session · {rank[0]} points en {-rank[1]:.2f} s"
+              f" · série {best_series} · replay {series_replays[best_series]}", flush=True)
 
 
 def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_record=None,

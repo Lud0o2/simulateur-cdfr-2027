@@ -182,7 +182,7 @@ class TrainingReplayTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main()
 
-    def test_endless_resets_from_scratch_and_keeps_only_the_session_best(self):
+    def test_endless_resets_from_scratch_and_saves_the_best_replay_of_each_series(self):
         incumbent = Network(np.random.default_rng(7))
         incumbent.training_matches = 49
         incumbent.biases[-1][0] = 99
@@ -242,12 +242,17 @@ class TrainingReplayTest(unittest.TestCase):
 
         self.assertEqual(played, [56, 53])
         self.assertEqual(mutate.call_count, sum(played))
-        self.assertEqual([path.name for path in paths], ["essai-0001-51pts-25.00s.json"])
-        self.assertEqual(replays[0]["serie"], 1)
-        self.assertEqual(_replay_rank(replays[0]), (51, -25))
+        self.assertEqual([path.name for path in paths], ["essai-0001-51pts-25.00s.json",
+                                                        "essai-0002-50pts-15.00s.json"])
+        self.assertEqual([replay["serie"] for replay in replays], [1, 2])
+        self.assertEqual([_replay_rank(replay) for replay in replays], [(51, -25), (50, -15)])
         lines = [call.args[0] for call in output.call_args_list]
         self.assertTrue(all(call.kwargs == {"flush": True} for call in output.call_args_list))
-        self.assertEqual(lines[-1], "Session · 51 points en 25.00 s · replay 1")
+        self.assertEqual([line for line in lines if " points en " in line],
+                         ["Série 1 · 51 points en 25.00 s · replay 1",
+                          "Série 2 · 50 points en 15.00 s · replay 2",
+                          "Session · 51 points en 25.00 s · série 1 · replay 1"])
+        self.assertEqual(lines[-1], "Session · 51 points en 25.00 s · série 1 · replay 1")
         self.assertEqual(sum("graine" in line for line in lines), 3)
         generations = [line for line in lines if "génération" in line]
         self.assertTrue(generations[0].startswith("Série 1 · génération 1 · 52 matchs"), generations[0])
