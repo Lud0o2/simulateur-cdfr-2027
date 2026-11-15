@@ -203,7 +203,7 @@ class Network:
         return network
 
     def save(self, path):
-        # Deux indices d'ouverture, le score, le temps négatif, puis les entrées et la cible.
+        # Deux indices d'ouverture, les points par seconde, le score, puis les entrées et la cible.
         experience = [np.column_stack((np.broadcast_to((*opening, *rank), (len(rows), 4)), rows))
                       for opening, (rank, rows) in self.experience.items()]
         moments = {f"adam_{name}_{index}": value
@@ -216,6 +216,7 @@ class Network:
                 np.savez(file, *self.weights, *self.biases, drop_offsets=np.asarray(self.drop_offsets),
                          drop_angles=np.asarray(self.drop_angles),
                          experience=np.concatenate(experience) if experience else np.empty((0, LAYERS[0] + 5)),
+                         rank_version=np.int64(2),
                          training_matches=self.training_matches, adam_updates=self.updates, **moments)
             temporary.replace(path)
         finally:
@@ -255,7 +256,11 @@ class Network:
                     raise ValueError("Mémoire d’entraînement invalide.")
                 for opening in np.unique(rows[:, :2], axis=0):
                     group = rows[np.all(rows[:, :2] == opening, axis=1)]
-                    network.experience[tuple(map(int, opening))] = (tuple(group[0, 2:4]), group[:, 4:].astype(np.float32))
+                    rank = tuple(group[0, 2:4])
+                    if "rank_version" not in data:
+                        # Ancien classement : score puis temps négatif.
+                        rank = _match_rank(rank[0], -rank[1])
+                    network.experience[tuple(map(int, opening))] = (rank, group[:, 4:].astype(np.float32))
             if "training_matches" in data:
                 count = data["training_matches"].tolist()
                 if type(count) is not int or count < 0:
@@ -331,8 +336,18 @@ class MatchPolicy:
                 self.opening.append(choice[1])
 
 
+def _match_rank(score, duration):
+    """Classe un match par points par seconde, puis par total de points."""
+    # Une durée nulle donnerait une cadence infinie : le plancher la garde en tête.
+    return score / max(duration, 1e-6), score
+
+
 def _replay_rank(replay):
-    return replay["score"], -replay["duree"]
+    return _match_rank(replay["score"], replay["duree"])
+
+
+def _format_rank(rank):
+    return f"{rank[0]:.2f} pts/s · {rank[1]} points"
 
 
 def _format_elapsed(seconds):
@@ -408,6 +423,7 @@ def train_matches(count, seed, incumbent=None, *, resume=False, learning_rate=No
 def _train_endless(seed, model, incumbent, *, resume, learning_rate=None):
     started = monotonic()
     saved_rank = None
+    saved_duration = None
     improved_at = None
     session_best = None
     series_best = None
@@ -416,42 +432,44 @@ def _train_endless(seed, model, incumbent, *, resume, learning_rate=None):
     seeds = np.random.SeedSequence(seed)
     workers = _training_workers(PROGRESS_WINDOW)
 
-    def record(network, rank):
-        nonlocal saved_rank, improved_at, session_best, series_best
+    def record(network, rank, duration):
+        nonlocal saved_rank, saved_duration, improved_at, session_best, series_best
         if series_best is None or rank > series_best[1]:
-            series_best = (network, rank)
+            series_best = (network, rank, duration)
         if session_best is None or rank > session_best[0]:
-            session_best = rank, series
+            session_best = rank, series, duration
         if saved_rank is None or rank > saved_rank:
             network.save(model)
-            saved_rank = rank
+            saved_rank, saved_duration = rank, duration
             improved_at = monotonic()
 
     def save_series():
         nonlocal series_best
         if series_best is None:
             return
-        network, rank = series_best
+        network, rank, duration = series_best
         replay = _validated_replay(network, rank, seed)
         replay.update(strategie="entrainement_endless", serie=series)
         number, _ = save_replay(replay, descriptive=True)
         series_replays[series] = number
         series_best = None
-        print(f"Série {series} · {rank[0]} points en {-rank[1]:.2f} s · replay {number}", flush=True)
+        print(f"Série {series} · {_format_rank(rank)} en {duration:.2f} s · replay {number}", flush=True)
 
-    def status(*, generation, played, batch, stalled):
+    def status(*, generation, played, batch, batch_duration, stalled):
         rank = saved_rank if saved_rank is not None else batch
+        duration = saved_duration if saved_rank is not None else batch_duration
         since = (f"aucune amélioration depuis {_format_elapsed(monotonic() - started)}"
                  if improved_at is None else f"amélioration il y a {_format_elapsed(monotonic() - improved_at)}")
         print(f"Série {series} · génération {generation} · {played} matchs"
-              f" · record {rank[0]} pts en {-rank[1]:.2f} s"
-              f" · meilleur du lot {batch[0]} pts en {-batch[1]:.2f} s"
+              f" · record {_format_rank(rank)} en {duration:.2f} s"
+              f" · meilleur du lot {_format_rank(batch)} en {batch_duration:.2f} s"
               f" · {since} · stagnation {stalled}/{PROGRESS_WINDOW}", flush=True)
 
     try:
         if incumbent is not None:
             replay, _ = _simulate_match((incumbent, None, False, False, False))
             saved_rank = _replay_rank(replay)
+            saved_duration = replay["duree"]
         with (ProcessPoolExecutor(max_workers=workers, initializer=signal.signal,
                                   initargs=(signal.SIGINT, signal.SIG_IGN)) if workers > 1 else nullcontext()) as pool:
             run_matches = pool.map if pool else map
@@ -473,8 +491,8 @@ def _train_endless(seed, model, incumbent, *, resume, learning_rate=None):
         if session_best is None:
             print("Entraînement arrêté.", flush=True)
             return
-        rank, best_series = session_best
-        print(f"Session · {rank[0]} points en {-rank[1]:.2f} s"
+        rank, best_series, duration = session_best
+        print(f"Session · {_format_rank(rank)} en {duration:.2f} s"
               f" · série {best_series} · replay {series_replays[best_series]}", flush=True)
 
 
@@ -485,6 +503,7 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
     mutation_rng = np.random.default_rng(seed)
     network = incumbent if resume else Network(rng)
     network_rank = None
+    network_duration = None
     stalled = 0
     generation = 0
     experience = incumbent.experience.copy() if incumbent is not None else {}
@@ -539,24 +558,26 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
         jobs = ((candidate._for_simulation(), None, False, False, False) for candidate in candidates)
         results = run_matches(_simulate_match, jobs)
         batch_rank = None
+        batch_duration = None
         for candidate, (replay, _) in zip(candidates, results, strict=True):
             rank = _replay_rank(replay)
+            duration = replay["duree"]
             if batch_rank is None or rank > batch_rank:
-                batch_rank = rank
+                batch_rank, batch_duration = rank, duration
             if previous_rank is None:
                 previous_rank = rank
             if network_rank is None or rank > network_rank:
-                network, network_rank = candidate, rank
+                network, network_rank, network_duration = candidate, rank, duration
         if endless:
             improved = network_rank > previous_rank
             stalled = 0 if improved else stalled + len(matches)
             if improved or start == 0:
                 network.experience = experience
                 network.training_matches = previous_matches + stop
-                on_record(network, network_rank)
+                on_record(network, network_rank, network_duration)
             if on_generation is not None:
                 on_generation(generation=generation, played=previous_matches + stop,
-                              batch=batch_rank, stalled=stalled)
+                              batch=batch_rank, batch_duration=batch_duration, stalled=stalled)
             if stalled == PROGRESS_WINDOW:
                 break
         start = stop
@@ -596,7 +617,8 @@ def main():
                                             learning_rate=args.learning_rate)
             network.save(args.model)
             number, _ = save_replay(replay)
-            print(f"Session · {replay['score']} points en {replay['duree']:.2f} s · replay {number}", flush=True)
+            print(f"Session · {_format_rank(_replay_rank(replay))} en {replay['duree']:.2f} s"
+                  f" · replay {number}", flush=True)
             completion_beep()
             return
 

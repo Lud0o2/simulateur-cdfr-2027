@@ -79,13 +79,25 @@ class TrainingReplayTest(unittest.TestCase):
             path = Path(directory) / "reseau.npz"
             best.save(path)
             loaded = Network.load(path)
-            self.assertEqual(loaded.experience[4, 1][0], (42, -25))
+            self.assertEqual(loaded.experience[4, 1][0], (42 / 25, 42))
             self.assertEqual(loaded.training_matches, 8)
             train.reset_mock()
             train_matches(1, 7, loaded, resume=True)
             inputs, targets, _ = train.call_args.args
             np.testing.assert_array_equal(inputs[-1], remembered)
             self.assertAlmostEqual(float(targets[-1]), (42 + 0.5 * (1 - 25 / MATCH_SECONDS)) / 8)
+
+    def test_loading_legacy_rank_converts_the_score_and_time_to_points_per_second(self):
+        network = Network(np.random.default_rng(7))
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
+            path = Path(directory) / "reseau.npz"
+            network.save(path)
+            rows = np.zeros((2, LAYERS[0] + 5))
+            rows[:, :2] = (4, 1)
+            rows[:, 2:4] = (42, -25)
+            np.savez(path, *network.weights, *network.biases, experience=rows)
+            loaded = Network.load(path)
+        self.assertEqual(loaded.experience[4, 1][0], (42 / 25, 42))
 
     def test_short_sessions_continue_the_random_match_schedule(self):
         network = Network(np.random.default_rng(7))
@@ -187,8 +199,8 @@ class TrainingReplayTest(unittest.TestCase):
         incumbent.training_matches = 49
         incumbent.biases[-1][0] = 99
         incumbent.drop_angles = (radians(10), *incumbent.drop_angles[1:])
-        incumbent.experience[0, 1] = (50, -20), np.full((1, LAYERS[0] + 1), 42, dtype=np.float32)
-        scores = {99: (50, 20), 1: (51, 25), 0: (40, 30), 2: (50, 15)}
+        incumbent.experience[0, 1] = (50 / 20, 50), np.full((1, LAYERS[0] + 1), 42, dtype=np.float32)
+        scores = {99: (50, 20), 1: (51, 20), 0: (40, 30), 2: (50, 15)}
         played = [0, 0]
         series = 0
 
@@ -236,27 +248,27 @@ class TrainingReplayTest(unittest.TestCase):
             incumbent.save(model)
             with patch("sys.argv", ["reseau", "--model", str(model), "train", "--endless", "--resume"]):
                 main()
-            self.assertEqual(Network.load(model).biases[-1][0], 1)
+            self.assertEqual(Network.load(model).biases[-1][0], 2)
             paths = sorted(Path(directory).glob("essai-*.json"))
             replays = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
 
         self.assertEqual(played, [56, 53])
         self.assertEqual(mutate.call_count, sum(played))
-        self.assertEqual([path.name for path in paths], ["essai-0001-51pts-25.00s.json",
+        self.assertEqual([path.name for path in paths], ["essai-0001-51pts-20.00s.json",
                                                         "essai-0002-50pts-15.00s.json"])
         self.assertEqual([replay["serie"] for replay in replays], [1, 2])
-        self.assertEqual([_replay_rank(replay) for replay in replays], [(51, -25), (50, -15)])
+        self.assertEqual([_replay_rank(replay) for replay in replays], [(51 / 20, 51), (50 / 15, 50)])
         lines = [call.args[0] for call in output.call_args_list]
         self.assertTrue(all(call.kwargs == {"flush": True} for call in output.call_args_list))
-        self.assertEqual([line for line in lines if " points en " in line],
-                         ["Série 1 · 51 points en 25.00 s · replay 1",
-                          "Série 2 · 50 points en 15.00 s · replay 2",
-                          "Session · 51 points en 25.00 s · série 1 · replay 1"])
-        self.assertEqual(lines[-1], "Session · 51 points en 25.00 s · série 1 · replay 1")
+        self.assertEqual([line for line in lines if "replay" in line],
+                         ["Série 1 · 2.55 pts/s · 51 points en 20.00 s · replay 1",
+                          "Série 2 · 3.33 pts/s · 50 points en 15.00 s · replay 2",
+                          "Session · 3.33 pts/s · 50 points en 15.00 s · série 2 · replay 2"])
+        self.assertEqual(lines[-1], "Session · 3.33 pts/s · 50 points en 15.00 s · série 2 · replay 2")
         self.assertEqual(sum("graine" in line for line in lines), 3)
         generations = [line for line in lines if "génération" in line]
         self.assertTrue(generations[0].startswith("Série 1 · génération 1 · 52 matchs"), generations[0])
-        self.assertIn("record 51 pts en 25.00 s", generations[1], generations[1])
+        self.assertIn("record 2.55 pts/s · 51 points en 20.00 s", generations[1], generations[1])
         self.assertTrue(generations[-1].startswith("Série 2 · génération 18 · 53 matchs"), generations[-1])
         self.assertTrue(generations[-1].endswith("stagnation 50/50"), generations[-1])
 
@@ -268,7 +280,7 @@ class TrainingReplayTest(unittest.TestCase):
         self.assertNotEqual(second.drop_angles, first.drop_angles)
         ranks = {(incumbent.drop_offsets, incumbent.drop_angles): (50, 22.7),
                  (first.drop_offsets, first.drop_angles): (50, 22.0),
-                 (second.drop_offsets, second.drop_angles): (49, 21.0)}
+                 (second.drop_offsets, second.drop_angles): (49, 23.0)}
 
         def play(_simulation, *, policy, record_frames=True):
             score, duration = ranks[policy.drop_offsets, policy.drop_angles]
@@ -280,7 +292,7 @@ class TrainingReplayTest(unittest.TestCase):
             best, winner = train_matches(2, 7, incumbent, resume=True)
         self.assertEqual([call.args[0] for call in mutate.call_args_list], [incumbent, first])
         self.assertIs(best, first)
-        self.assertEqual(_replay_rank(winner), (50, -22))
+        self.assertEqual(_replay_rank(winner), (50 / 22, 50))
         self.assertEqual(incumbent.drop_offsets, CENTERED_OFFSETS)
 
     def test_deposit_mutations_can_reach_200_mm_and_keep_a_single_changed_pose(self):
@@ -333,13 +345,13 @@ class TrainingReplayTest(unittest.TestCase):
             pool.return_value.__enter__.return_value.map = map
             best, winner = train_matches(6, 7, incumbent, resume=True)
         pool.assert_called_once_with(max_workers=2)
-        self.assertEqual(training_weights, [0, 0, 1, 1, 3, 3])
+        self.assertEqual(training_weights, [0, 0, 2, 2, 4, 4])
         self.assertEqual(candidate_parents, training_weights)
-        self.assertEqual(best.biases[-1][0], 3)
+        self.assertEqual(best.biases[-1][0], 4)
         self.assertEqual(incumbent.biases[-1][0], 0)
-        self.assertEqual((winner["score"], winner["duree"]), (48, 30))
-        self.assertEqual(evaluated_weights, [0, 0, 0, 1, 2, 1, 1, 3, 4, 3, 3, 5, 6])
-        self.assertEqual(recorded_winners, [3])
+        self.assertEqual((winner["score"], winner["duree"]), (46, 10))
+        self.assertEqual(evaluated_weights, [0, 0, 0, 1, 2, 2, 2, 3, 4, 4, 4, 5, 6])
+        self.assertEqual(recorded_winners, [4])
         lower = (60 + 0.5 * (1 - 15 / MATCH_SECONDS)) / 8
         high = (64 + 0.5 * (1 - 15 / MATCH_SECONDS)) / 8
         faster = (64 + 0.5 * (1 - 13 / MATCH_SECONDS)) / 8
@@ -369,9 +381,12 @@ class TrainingReplayTest(unittest.TestCase):
               patch("src.reseau.ProcessPoolExecutor") as pool):
             pool.return_value.__enter__.return_value.map = map
             train_matches(2, 7, incumbent, resume=True)
-        np.testing.assert_array_equal(targets[0][:5], [targets[0][0]] * 5)
-        self.assertAlmostEqual(float(targets[0][0] - targets[0][-1]), 1)
-        self.assertGreater(targets[0][0], targets[1][-1])
+        # Le match le plus rapide (40 points en 1 s) est appris seul en premier.
+        self.assertEqual(len(targets[0]), 1)
+        late = targets[1][1:]
+        np.testing.assert_array_equal(late[:5], [late[0]] * 5)
+        self.assertAlmostEqual(float(late[0] - late[-1]), 1)
+        self.assertGreater(late[0], targets[0][-1])
 
     def test_validates_initial_weights_even_when_training_records_no_decisions(self):
         incumbent = Network(np.random.default_rng(7))
@@ -409,7 +424,7 @@ class TrainingReplayTest(unittest.TestCase):
         save_model.assert_called_once_with(Path("reseau.npz"))
         self.assertEqual([call.args[0] for call in output.call_args_list], [
             "Simulation · 1 processus pour 1 matchs d’entraînement",
-            "Session · 50 points en 24.31 s · replay 51",
+            "Session · 2.06 pts/s · 50 points en 24.31 s · replay 51",
         ])
 
     def test_resume_explores_alternatives_among_the_five_best_choices(self):
@@ -440,12 +455,18 @@ class TrainingReplayTest(unittest.TestCase):
         first_choices = [policy.order(simulation, {2: 9}, choices, pickup=True)[0] for _ in range(100)]
         self.assertEqual(set(first_choices), {choices[index] for index in (0, 4, 5, 6, 7)})
 
-    def test_replay_rank_prefers_score_then_total_duration(self):
-        short = {"score": 40, "duree": 38}
-        long = {"score": 40, "duree": 72}
-        lower = {"score": 32, "duree": 15}
-        self.assertGreater(_replay_rank(short), _replay_rank(long))
-        self.assertGreater(_replay_rank(long), _replay_rank(lower))
+    def test_replay_rank_prefers_points_per_second_then_total_score(self):
+        quick = {"score": 40, "duree": 20}
+        slow = {"score": 40, "duree": 40}
+        many = {"score": 60, "duree": 80}
+        few = {"score": 30, "duree": 40}
+        longer = {"score": 80, "duree": 100}
+        self.assertGreater(_replay_rank(quick), _replay_rank(slow))
+        # Même cadence : le total de points départage.
+        self.assertGreater(_replay_rank(many), _replay_rank(few))
+        self.assertEqual(_replay_rank(many)[0], _replay_rank(few)[0])
+        # Une cadence plus élevée l'emporte sur un plus gros total.
+        self.assertGreater(_replay_rank(longer), _replay_rank(many))
 
     def test_network_can_finish_even_with_a_pickup_available(self):
         class FinishFirst:
