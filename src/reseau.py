@@ -32,6 +32,20 @@ EXPLORATION_INTERVAL = 8
 PROGRESS_WINDOW = 50  # matchs d'entraînement sans nouveau record autonome
 DROP_OFFSET_LIMIT = 200  # mm depuis le centre du rempart
 CENTERED_OFFSETS = ((0, 0),) * len(CENTERED_DROPS)
+BATCH_SIZE = 64
+EPOCHS = 8  # passages sur les exemples mémorisés par mise à jour
+MAX_STEPS = 64
+LEARNING_RATE = 0.002
+LEARNING_RATE_FLOOR = 0.0002
+LEARNING_RATE_HALVING = 200  # matchs d'entraînement entre deux divisions du pas
+ADAM_BETAS = (0.9, 0.999)
+ADAM_EPSILON = 1e-8
+MOMENT_NAMES = ("moment_w", "variance_w", "moment_b", "variance_b")
+
+
+def _learning_rate(training_matches):
+    # Un réseau déjà éprouvé bouge moins qu'une initialisation aléatoire.
+    return max(LEARNING_RATE_FLOOR, LEARNING_RATE * 0.5 ** (max(0, training_matches) // LEARNING_RATE_HALVING))
 
 
 def _read_drop_offsets(values):
@@ -123,6 +137,10 @@ class Network:
         self.weights = [rng.normal(0, (2 / size) ** 0.5, (size, width)).astype(np.float32)
                         for size, width in zip(LAYERS, LAYERS[1:])]
         self.biases = [np.zeros(width, dtype=np.float32) for width in LAYERS[1:]]
+        self.moments = [[np.zeros_like(weights), np.zeros_like(weights),
+                         np.zeros_like(biases), np.zeros_like(biases)]
+                        for weights, biases in zip(self.weights, self.biases)]
+        self.updates = 0
         self.drop_offsets = CENTERED_OFFSETS
         self.drop_angles = ALIGNED_ANGLES
         self.experience = {}
@@ -139,24 +157,42 @@ class Network:
         return self._forward(inputs)[-1][:, 0]
 
     def _learn(self, values, gradient, learning_rate):
+        self.updates += 1
+        first = 1 - ADAM_BETAS[0] ** self.updates
+        second = 1 - ADAM_BETAS[1] ** self.updates
         for layer in reversed(range(len(self.weights))):
             weights = self.weights[layer]
             previous = (gradient @ weights.T) * (values[layer] > 0) if layer else None
-            weights -= learning_rate * (values[layer].T @ gradient)
-            self.biases[layer] -= learning_rate * gradient.sum(axis=0)
+            moment, variance, bias_moment, bias_variance = self.moments[layer]
+            self._apply(weights, moment, variance, values[layer].T @ gradient, learning_rate, first, second)
+            self._apply(self.biases[layer], bias_moment, bias_variance, gradient.sum(axis=0),
+                        learning_rate, first, second)
             gradient = previous
 
-    def train(self, inputs, targets, rng, *, learning_rate=0.01):
-        for _ in range(64):
-            batch = rng.integers(len(inputs), size=min(64, len(inputs)))
-            values = self._forward(inputs[batch])
-            gradient = 2 * (values[-1] - targets[batch, None]) / len(batch)
+    @staticmethod
+    def _apply(parameter, moment, variance, gradient, learning_rate, first, second):
+        # Adam normalise chaque paramètre par la moyenne et la variance de son gradient.
+        moment *= ADAM_BETAS[0]
+        moment += (1 - ADAM_BETAS[0]) * gradient
+        variance *= ADAM_BETAS[1]
+        variance += (1 - ADAM_BETAS[1]) * gradient * gradient
+        parameter -= learning_rate * (moment / first) / (np.sqrt(variance / second) + ADAM_EPSILON)
+
+    def train(self, inputs, targets, rng, *, learning_rate=LEARNING_RATE):
+        batch = min(BATCH_SIZE, len(inputs))
+        # Un budget en époques évite de mémoriser un lot de quelques lignes.
+        steps = max(1, min(MAX_STEPS, round(EPOCHS * len(inputs) / batch)))
+        for _ in range(steps):
+            sample = rng.integers(len(inputs), size=batch)
+            values = self._forward(inputs[sample])
+            gradient = 2 * (values[-1] - targets[sample, None]) / len(sample)
             self._learn(values, gradient, learning_rate)
 
     def _training_copy(self):
         candidate = copy(self)
         candidate.weights = [weights.copy() for weights in self.weights]
         candidate.biases = [biases.copy() for biases in self.biases]
+        candidate.moments = [[values.copy() for values in layer] for layer in self.moments]
         return candidate
 
     def _for_simulation(self):
@@ -170,6 +206,9 @@ class Network:
         # Deux indices d'ouverture, le score, le temps négatif, puis les entrées et la cible.
         experience = [np.column_stack((np.broadcast_to((*opening, *rank), (len(rows), 4)), rows))
                       for opening, (rank, rows) in self.experience.items()]
+        moments = {f"adam_{name}_{index}": value
+                   for index, layer in enumerate(self.moments)
+                   for name, value in zip(MOMENT_NAMES, layer)}
         file = NamedTemporaryFile(dir=path.parent, suffix=".npz", delete=False)
         temporary = Path(file.name)
         try:
@@ -177,7 +216,7 @@ class Network:
                 np.savez(file, *self.weights, *self.biases, drop_offsets=np.asarray(self.drop_offsets),
                          drop_angles=np.asarray(self.drop_angles),
                          experience=np.concatenate(experience) if experience else np.empty((0, LAYERS[0] + 5)),
-                         training_matches=self.training_matches)
+                         training_matches=self.training_matches, adam_updates=self.updates, **moments)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -222,6 +261,20 @@ class Network:
                 if type(count) is not int or count < 0:
                     raise ValueError("Compteur d’entraînement invalide.")
                 network.training_matches = count
+            for index, layer in enumerate(network.moments):
+                for name, target in zip(MOMENT_NAMES, layer):
+                    key = f"adam_{name}_{index}"
+                    if key not in data:
+                        continue
+                    loaded = data[key]
+                    if loaded.shape != target.shape or loaded.dtype != target.dtype or not np.all(np.isfinite(loaded)):
+                        raise ValueError("Paramètres du réseau invalides.")
+                    target[:] = loaded
+            if "adam_updates" in data:
+                count = data["adam_updates"].tolist()
+                if type(count) is not int or count < 0:
+                    raise ValueError("Compteur d’entraînement invalide.")
+                network.updates = count
         return network
 
 
@@ -336,11 +389,12 @@ def _training_workers(count):
     return min(count, available, 61 if os.name == "nt" else available)
 
 
-def train_matches(count, seed, incumbent=None, *, resume=False):
+def train_matches(count, seed, incumbent=None, *, resume=False, learning_rate=None):
     workers = _training_workers(count)
     print(f"Simulation · {workers} processus pour {count} matchs d’entraînement", flush=True)
     with (ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext()) as pool:
-        network, rank = _train_matches(count, seed, incumbent, resume, workers, pool.map if pool else map)
+        network, rank = _train_matches(count, seed, incumbent, resume, workers, pool.map if pool else map,
+                                       learning_rate=learning_rate)
     replay = _validated_replay(network, rank, seed)
     if incumbent is not None and not resume:
         previous, _ = _simulate_match((incumbent, None, False, False, False))
@@ -351,7 +405,7 @@ def train_matches(count, seed, incumbent=None, *, resume=False):
     return network, replay
 
 
-def _train_endless(seed, model, incumbent, *, resume):
+def _train_endless(seed, model, incumbent, *, resume, learning_rate=None):
     started = monotonic()
     saved_rank = None
     improved_at = None
@@ -391,7 +445,8 @@ def _train_endless(seed, model, incumbent, *, resume):
                       f"{'reprise du modèle' if starting_network is not None else 'nouveau réseau aléatoire'}",
                       flush=True)
                 _train_matches(None, seed, starting_network, starting_network is not None,
-                               workers, run_matches, on_record=record, on_generation=status)
+                               workers, run_matches, on_record=record, on_generation=status,
+                               learning_rate=learning_rate)
                 series += 1
                 seed = int(seeds.spawn(1)[0].generate_state(1)[0])
                 starting_network = None
@@ -407,7 +462,7 @@ def _train_endless(seed, model, incumbent, *, resume):
 
 
 def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_record=None,
-                   on_generation=None):
+                   on_generation=None, learning_rate=None):
     endless = count is None
     rng = np.random.default_rng(seed)
     mutation_rng = np.random.default_rng(seed)
@@ -418,7 +473,7 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
     experience = incumbent.experience.copy() if incumbent is not None else {}
     previous_matches = incumbent.training_matches if incumbent is not None else 0
     played = previous_matches if resume else 0
-    learning_rate = 0.005 if resume else 0.01
+    learning_rate = _learning_rate(played) if learning_rate is None else learning_rate
     warmup_matches = max(1, (PROGRESS_WINDOW if endless else count) // 3)
     seeds = np.random.SeedSequence(seed, n_children_spawned=played)
     examples = deque(maxlen=512)
@@ -504,6 +559,8 @@ def main():
                           help=f"Repart de zéro après {PROGRESS_WINDOW} matchs sans amélioration.")
     train.add_argument("--seed", type=int, default=7, help="Graine des tirages (par défaut : %(default)s).")
     train.add_argument("--resume", action="store_true", help="Repart des poids du fichier choisi.")
+    train.add_argument("--learning-rate", type=float, default=None, metavar="TAUX",
+                       help="Pas d’apprentissage fixe ; par défaut, il diminue avec les matchs déjà joués.")
     commands.add_parser("compare", help="Compare le réseau sauvegardé à l’étape 4 sur la table officielle.")
     parser.add_argument("--model", type=Path, default=MODEL)
     args = parser.parse_args()
@@ -511,11 +568,15 @@ def main():
         if args.command == "train":
             if args.matches < 1:
                 parser.error("--matches doit être strictement positif.")
+            if args.learning_rate is not None and not args.learning_rate > 0:
+                parser.error("--learning-rate doit être strictement positif.")
             incumbent = Network.load(args.model) if args.resume or args.model.exists() else None
             if args.endless:
-                _train_endless(args.seed, args.model, incumbent, resume=args.resume)
+                _train_endless(args.seed, args.model, incumbent, resume=args.resume,
+                               learning_rate=args.learning_rate)
                 return
-            network, replay = train_matches(args.matches, args.seed, incumbent, resume=args.resume)
+            network, replay = train_matches(args.matches, args.seed, incumbent, resume=args.resume,
+                                            learning_rate=args.learning_rate)
             network.save(args.model)
             number, _ = save_replay(replay)
             print(f"Session · {replay['score']} points en {replay['duree']:.2f} s · replay {number}", flush=True)

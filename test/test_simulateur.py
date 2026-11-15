@@ -15,8 +15,9 @@ from src.match import (
     _drop_approach, _follow, _pickup_approach, _route, place_pile, play_match, save_replay, take_pile,
 )
 from src.reseau import (
-    ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, EXPLORATION_INTERVAL, LAYERS, PROGRESS_WINDOW, TABLE_DIAGONAL,
-    MatchPolicy, Network, _mutate_drop_pose, _replay_rank, features, train_matches,
+    ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, EPOCHS, EXPLORATION_INTERVAL, LAYERS, LEARNING_RATE,
+    LEARNING_RATE_FLOOR, LEARNING_RATE_HALVING, MAX_STEPS, PROGRESS_WINDOW, TABLE_DIAGONAL, MatchPolicy, Network,
+    _learning_rate, _mutate_drop_pose, _replay_rank, features, train_matches,
 )
 from src.simulateur import (
     START, START_BLOCKS, TOWER_CENTERS, TURN_STEP, RobotGeometry, Simulation, load_robot,
@@ -99,6 +100,87 @@ class TrainingReplayTest(unittest.TestCase):
         with patch("src.reseau.play_match", side_effect=play):
             train_matches(1, 7, network, resume=True)
         self.assertEqual(network.training_matches, total)
+
+    def test_learning_rate_halves_every_two_hundred_matches_down_to_a_floor(self):
+        self.assertEqual(_learning_rate(0), LEARNING_RATE)
+        self.assertEqual(_learning_rate(LEARNING_RATE_HALVING - 1), LEARNING_RATE)
+        self.assertEqual(_learning_rate(LEARNING_RATE_HALVING), LEARNING_RATE / 2)
+        self.assertEqual(_learning_rate(10 * LEARNING_RATE_HALVING), LEARNING_RATE_FLOOR)
+
+    def test_resumed_training_uses_the_step_scheduled_from_played_matches(self):
+        incumbent = Network(np.random.default_rng(7))
+        incumbent.training_matches = LEARNING_RATE_HALVING
+        steps = []
+
+        def play(_simulation, *, policy, record_frames=True):
+            if policy.rng is not None:
+                policy.history.append((np.zeros(LAYERS[0], dtype=np.float32), 0))
+            return {"score": 50, "duree": 20}
+
+        def update(_network, _rows, _targets, _rng, *, learning_rate):
+            steps.append(learning_rate)
+
+        with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
+              patch("src.reseau.os.process_cpu_count", return_value=1, create=True)):
+            train_matches(1, 7, incumbent, resume=True)
+            train_matches(1, 7, incumbent, resume=True, learning_rate=0.02)
+            train_matches(1, 7, incumbent)
+        self.assertEqual(steps, [LEARNING_RATE / 2, 0.02, LEARNING_RATE])
+
+    def test_learning_budget_counts_epochs_instead_of_a_fixed_step_count(self):
+        rng = np.random.default_rng(7)
+        network = Network(rng)
+        calls = []
+
+        with patch.object(Network, "_learn", side_effect=lambda *arguments: calls.append(arguments)):
+            network.train(np.zeros((6, LAYERS[0]), dtype=np.float32), np.zeros(6, dtype=np.float32), rng)
+            self.assertEqual(len(calls), EPOCHS)
+            calls.clear()
+            rows = MAX_STEPS * EPOCHS
+            network.train(np.zeros((rows, LAYERS[0]), dtype=np.float32), np.zeros(rows, dtype=np.float32), rng)
+            self.assertEqual(len(calls), MAX_STEPS)
+
+    def test_adam_state_round_trips_and_old_models_start_from_zero(self):
+        rng = np.random.default_rng(7)
+        rows = features(two_pile_simulation(), {}, [(1, 0, 1), (1, 1, 2)], pickup=True)
+        targets = np.array([1.0, 0.0], dtype=np.float32)
+        network = Network(rng)
+        network.train(rows, targets, rng)
+        self.assertGreater(network.updates, 0)
+        with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
+            path = Path(directory) / "reseau.npz"
+            network.save(path)
+            loaded = Network.load(path)
+            self.assertEqual(loaded.updates, network.updates)
+            for saved, restored in zip(network.moments, loaded.moments):
+                for source, target in zip(saved, restored):
+                    np.testing.assert_array_equal(target, source)
+            expected, actual = network._training_copy(), loaded._training_copy()
+            expected.train(rows, targets, np.random.default_rng(3))
+            actual.train(rows, targets, np.random.default_rng(3))
+            np.testing.assert_array_equal(actual.predict(rows), expected.predict(rows))
+            np.savez(path, *network.weights, *network.biases)
+            legacy = Network.load(path)
+        self.assertEqual(legacy.updates, 0)
+        self.assertTrue(all(not moment.any() for layer in legacy.moments for moment in layer))
+
+    def test_learning_rate_option_overrides_the_schedule_from_the_command_line(self):
+        from src.reseau import main
+
+        incumbent = Network(np.random.default_rng(7))
+        replay = {"score": 1, "duree": 1.0}
+        with (patch.object(Network, "load", return_value=incumbent),
+              patch("src.reseau.train_matches", return_value=(incumbent, replay)) as train,
+              patch.object(Network, "save"), patch("src.reseau.save_replay", return_value=(1, "1.json")),
+              patch("src.reseau.completion_beep"), patch("builtins.print"),
+              patch("sys.argv", ["reseau", "--model", "reseau.npz", "train", "--resume",
+                                 "--learning-rate", "0.003"])):
+            main()
+        self.assertEqual(train.call_args.kwargs["learning_rate"], 0.003)
+        with (patch("sys.argv", ["reseau", "--model", "reseau.npz", "train", "--learning-rate", "0"]),
+              patch("sys.stderr", mock_open())):
+            with self.assertRaises(SystemExit):
+                main()
 
     def test_endless_resets_from_scratch_and_keeps_only_the_session_best(self):
         incumbent = Network(np.random.default_rng(7))

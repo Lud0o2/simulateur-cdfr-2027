@@ -42,6 +42,12 @@ python -B -m src.reseau train --resume --matches 100
 
 Pour entraîner un nouveau réseau dans un fichier distinct, choisis un nom de fichier encore libre avec `python -B -m src.reseau --model reseau-nouveau.npz train`.
 
+**Imposer un pas d’apprentissage fixe pour comparer deux réglages**
+
+```powershell
+python -B -m src.reseau train --resume --matches 24 --seed 8 --learning-rate 0.001
+```
+
 **Comparer le réseau sauvegardé à la stratégie de référence**
 
 ```powershell
@@ -192,7 +198,9 @@ Le réseau **97 → 16 → 8 → 1** a **1 713 paramètres**. Il reçoit l’ét
 
 L’entraînement alterne la stratégie multi-piles, l’exploration et les décisions du réseau. Chaque match démarre avec les dix piles centrées sur leurs zones de stockage, aux emplacements du plan G.1. La graine fait varier les décisions explorées. Le réseau classe jusqu’à huit prises et tous les dépôts proposés, avec les deux sens d’approche de chaque rempart. Dès la première prise, il peut arrêter de charger et commencer à déposer. À vide, il peut choisir de rentrer et de terminer. Pour chaque décision, il apprend les points marqués d’ici la fin du match, retour compris. Les points tardifs ont le même poids que les points immédiats. Finir plus vite ajoute au plus l’équivalent d’un demi-point aux cibles d’apprentissage. [Règlement Eurobot 2027, plan G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
 
-`train --resume` repart des poids de `reseau.npz`. Lors des matchs guidés en reprise, le réseau explore une autre action dans 30 % des décisions, parmi les choix du deuxième au cinquième rang. Quand le robot est chargé, une place est réservée à la prise la plus rapide vers une autre pile. Le taux d’apprentissage est de 0,005 en reprise et de 0,01 avec une nouvelle initialisation.
+`train --resume` repart des poids de `reseau.npz`. Lors des matchs guidés en reprise, le réseau explore une autre action dans 30 % des décisions, parmi les choix du deuxième au cinquième rang. Quand le robot est chargé, une place est réservée à la prise la plus rapide vers une autre pile.
+
+L’apprentissage utilise Adam. Le pas part de **0,002** pour un réseau neuf et diminue de moitié tous les **200** matchs joués, jusqu’à un plancher de **0,0002** : le pas ne dépend donc plus du drapeau `--resume` mais du nombre de matchs déjà enregistrés. Une mise à jour parcourt **8 époques** des exemples du candidat, par lots de 64 lignes au plus, avec un plafond de **64 pas** : un lot de six lignes reçoit ainsi huit pas au lieu de soixante-quatre, ce qui évite de le mémoriser. `--learning-rate` impose un pas fixe, utile pour comparer deux réglages avec la même graine. Les moments d’Adam sont enregistrés dans `reseau.npz` ; un ancien fichier sans ces tableaux repart de moments nuls.
 
 Un match d’entraînement sur huit choisit ses actions au hasard parmi toutes les prises accessibles et tous les dépôts proposés. Il poursuit la construction tant qu’une prise reste accessible à vide. Pour chaque ouverture, définie par les deux premières piles prises, l’entraînement conserve les décisions et les récompenses du meilleur match qui a marqué des points de construction. Les candidats réutilisent aussi des exemples tirés de cette mémoire. En fin d’entraînement à durée fixe, `reseau.npz` conserve cette mémoire et le nombre de matchs joués, même quand le meilleur réseau reste le même. Avec `--resume`, les tirages et la fréquence des matchs aléatoires tiennent compte des sessions précédentes.
 
@@ -211,6 +219,8 @@ Le mode `--endless` démarre avec des poids aléatoires. Avec `--resume`, seule 
 Le 14 novembre 2026, un essai de **24 matchs d’entraînement** avec la graine 8 a pris **17,9 s** sur 8 processus, dont **11,9 s** pour les matchs d’entraînement. La validation finale a joué 6 matchs, contre 75 avec la validation après chaque mise à jour. Les poids d’origine ont été conservés lors de cet essai.
 
 Le 14 novembre 2026, la réutilisation des poses et des zones de score a ramené le temps médian pour **24 simulations à poids fixes** de **22,76 s à 17,09 s** sur 8 processus déjà lancés. Les deux versions ont produit les mêmes replays et les mêmes données d’entraînement. Cette mesure exclut la mise à jour des poids et la validation finale.
+
+Le 15 novembre 2026, sur les **212 exemples** mémorisés dans `reseau.npz`, une génération de 26 pas a fait passer la perte de **1,63 à 1,05** avec Adam et un pas de 0,002, contre **1,02** avec l’ancien gradient simple et 64 pas à 0,01. Un pas de 0,005 atteint 0,90 mais déplace 25 % de la norme de la première couche par génération. Un pas de 0,02 fait remonter la perte à 0,97, et 0,1 effondrait l’ancien gradient simple sur une sortie constante. Les 10 générations successives restent finies et font baisser la perte jusqu’à 0,38.
 
 Sans `--seed`, l’entraînement utilise la graine `7`. Passe `--seed` avec un autre entier pour changer la suite des tirages. La graine utilisée figure dans le replay.
 
