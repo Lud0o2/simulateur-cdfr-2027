@@ -34,16 +34,19 @@ La cible tient en cinq contrats et une racine de composition :
 
 Le `RobotSpec` chargé depuis le TOML porte la géométrie, les ventouses, le mouvement et les capacités de construction. `MoteurPhysique` ne connaît que des corps, des contraintes et un `TerrainSpec`. `app.py` assemble le tout à partir d'un profil.
 
-Ordre recommandé, en quatre lots validables :
+Ordre recommandé, en cinq lots validables :
 
 | Lot | Phases | Contenu | Risque |
 | --- | --- | --- | --- |
-| A | 0 à 3 | Baseline, domaine, `RobotSpec` + TOML, frontière physique/robot. | Moyen : touche le moteur. |
-| B | 4 et 5 | Planification et actions interchangeables. | Moyen : déplace beaucoup de code de `match.py`. |
-| C | 6 et 7 | Récompenses, sélection, réseaux, composition et CLI. | Élevé : touche l'entraînement et les modèles. |
+| A | 0 à 3 | Baseline, domaine, `RobotSpec` + TOML, frontière physique/robot, scénario, ressources, horloge, aléa. | Moyen : touche le moteur. |
+| B | 4 et 5 | Planification, actions, préhenseur, génération de candidats, orchestrateur de match. | Moyen : déplace beaucoup de code de `match.py`. |
+| C | 6 et 7 | Récompenses, sélection, réseaux, entraînement décomposé, schéma de caractéristiques, évaluation, composition et CLI. | Élevé : touche l'entraînement et les modèles. |
 | D | 8 | Tours, portes, base différentielle, duels. | Fonctionnel, après validation de l'architecture. |
+| E | 9 | Interface, lecteur de replay, reporting et observabilité. | Faible, peut avancer en parallèle après le lot A. |
 
 Chaque lot doit se terminer par les tests complets et une comparaison au score de référence. Le comportement par défaut ne doit pas changer avant la phase 8.
+
+La section [8.1](#81-autres-sous-parties-à-modulariser) détaille les sous-parties supplémentaires qui resteraient monolithiques : interface, orchestration du match, règlement, entraînement, caractéristiques, préhenseur, scénario, infrastructure et évaluation.
 
 ## 3. État des lieux
 
@@ -82,8 +85,14 @@ src/
 │   ├── geometrie.py              # polygones, SAT, arcs, travel_time
 │   ├── terrain.py                # TerrainSpec et requêtes de zones
 │   ├── robot.py                  # RobotSpec, Ventouse, Construction, capacités
-│   └── score.py                  # règles de score pures
-├── terrain/
+│   ├── prehenseur.py             # Prehenseur : ventouse, pince, etc.
+│   ├── scenario.py               # ScenarioSpec : terrain, robots, piles, obstacles
+│   └── score.py                  # mécanique de score, sans valeurs de barème
+├── regles/
+│   ├── match_2027.py             # durées, phases, constantes de la saison
+│   ├── bareme.py                 # valeurs de score interchangeables
+│   └── phases.py                 # construction, retour, fin de match
+├── terrains/
 │   └── officiel_2027.py          # données du terrain officiel
 ├── robots/
 │   └── robotronik/
@@ -92,28 +101,42 @@ src/
 ├── physique/
 │   ├── moteur.py                 # MoteurPhysique : corps, contraintes, pas fixe
 │   ├── corps.py                  # PileBody, RobotBody
-│   └── collisions.py             # requêtes de collision
+│   ├── collisions.py             # requêtes de collision
+│   ├── mouvement.py              # modèle holonome ou différentiel
+│   ├── pile.py                   # corps et joints d'une pile
+│   ├── frottement.py             # freinage sol, tapis, contacts
+│   └── prehenseur_ventouse.py    # capture et relâchement par ventouse
 ├── planification/
 │   ├── base.py                   # Planificateur, DemandeTrajet, Trajet
 │   ├── astar.py                  # routeur actuel
 │   ├── direct.py                 # ligne droite, utile aux tests
-│   └── grille.py                 # variante future
+│   ├── grille.py                 # variante future
+│   ├── cout.py                   # coût temps / énergie / risque
+│   └── rotation.py               # roulage, pivot, enveloppe de rotation
 ├── actions/
 │   ├── base.py                   # Action, ContexteAction, Candidat
 │   ├── prise.py
 │   ├── depose.py
+│   ├── approche.py               # génération des approches de prise/dépose
 │   ├── construction.py           # mur / tour / porte
-│   └── retour.py
+│   ├── retour.py
+│   └── execution.py              # suivi de trajet, fin de course, état d'action
 ├── strategies/
 │   ├── reference.py              # stratégie gloutonne actuelle
 │   ├── lots.py                   # chargement multi-ventouses
-│   └── poses.py                  # sites et poses de dépôt
+│   ├── candidats.py              # génération des candidats
+│   └── poses.py                  # catalogue de poses de dépôt
+├── deroulement/
+│   ├── runner.py                 # phases et enchaînement d'un match
+│   ├── recorder.py               # politique d'enregistrement des frames
+│   └── phases.py                 # construction, retour, fin
 ├── recompenses/
 │   ├── base.py                   # Recompense
 │   ├── construction.py           # score de construction seul
 │   ├── construction_temps.py     # score + bonus de temps
 │   ├── retour.py                 # bonus de salle du trône
-│   └── depots.py                 # récompense par dépose
+│   ├── depots.py                 # récompense par dépose
+│   └── sparse.py                 # récompense seulement en fin d'épisode
 ├── selection/
 │   ├── base.py                   # Selecteur
 │   ├── glouton.py                # gain / durée
@@ -122,17 +145,56 @@ src/
 │   └── reseau.py                 # politique actuelle
 ├── reseaux/
 │   ├── base.py                   # Reseau, EncodeurCaracteristiques
-│   ├── caracteristiques.py       # encodage 97 entrées
+│   ├── observation.py            # Simulation -> Observation
+│   ├── caracteristiques/
+│   │   ├── globales.py
+│   │   ├── piles.py
+│   │   ├── candidats.py
+│   │   ├── normalisation.py
+│   │   └── schema.py             # schéma versionné des entrées
 │   ├── mlp.py                    # MLP NumPy actuel
 │   ├── lineaire.py               # variante de test
-│   ├── entrainement.py           # générations, mutations, workers
+│   ├── constante.py              # valeur constante
+│   ├── optimiseur.py             # SGD, Adam, etc.
+│   ├── memoire.py                # mémoire d'expérience
+│   ├── mutation.py               # mutation des poses de dépôt
+│   ├── execution.py              # série, processus, thread, factice
+│   ├── validation.py             # replay de validation et rang
+│   ├── series.py                 # séries sans fin, checkpoints
+│   ├── rapport.py                # reporting d'entraînement
+│   ├── hyperparametres.py        # pas d'apprentissage, lots, époques
+│   ├── entrainement.py           # boucle générationnelle
 │   └── stockage.py               # .npz, métadonnées, migrations
+├── evaluation/
+│   ├── scenarios.py              # jeux de scénarios et de graines
+│   ├── benchmark.py              # comparaison de variantes
+│   └── metriques.py              # score, durée, réussite
 ├── replay/
-│   ├── format.py                 # validation
+│   ├── format.py                 # validation et version de schéma
 │   ├── io.py                     # sauvegarde atomique
-│   └── lecture.py                # Replay
+│   ├── store.py                  # numérotation et index des essais
+│   ├── recorder.py               # échantillonnage et déduplication
+│   ├── lecture.py                # Replay
+│   └── player.py                 # état temporel sans Tkinter
+├── infra/
+│   ├── ressources.py             # racine, assets, replays, modèles
+│   ├── horloge.py                # horloge réelle ou factice
+│   ├── alea.py                   # graines et générateurs
+│   ├── rapport.py                # console, silencieux, JSON
+│   └── notificateur.py           # bip, silence, autre canal
+├── cli/
+│   ├── match.py
+│   ├── train.py
+│   ├── replay.py
+│   └── ui.py
 ├── ui/
-│   └── tkinter.py                # interface actuelle
+│   ├── tkinter.py                # point d'entrée historique
+│   ├── window.py                 # assemblage de la fenêtre
+│   ├── theme.py                  # couleurs, polices, marges
+│   ├── assets.py                 # chargement et redimensionnement du tapis
+│   ├── canvas_renderer.py        # dessin sans événement
+│   ├── manual_controller.py      # clics, clavier, reset, boucle
+│   └── replay_controller.py      # lecture, pause, curseur
 ├── simulateur.py                 # façade de compatibilité (phase de transition)
 ├── match.py                      # façade CLI de compatibilité
 ├── reseau.py                     # façade CLI de compatibilité
@@ -460,13 +522,21 @@ input_size       = 97
 
 `stockage.py` refuse un modèle dont le schéma ou la taille ne correspond pas, avec un message explicite.
 
-### 6.8 Composition
+### 6.8 Scénario et composition
 
 ```python
 @dataclass(frozen=True)
-class Composition:
-    robot: RobotSpec
+class ScenarioSpec:
     terrain: TerrainSpec
+    robot: RobotSpec
+    obstacles: tuple[Rectangle, ...] = ()
+    piles_initiales: tuple[Rectangle, ...] = ()
+    graine: int | None = None
+
+
+@dataclass(frozen=True)
+class Composition:
+    scenario: ScenarioSpec
     planificateur: Planificateur
     actions: tuple[Action, ...]
     recompense: Recompense
@@ -475,7 +545,7 @@ class Composition:
     encodeur: EncodeurCaracteristiques | None
 ```
 
-La racine de composition construit cette structure à partir d'un profil TOML et d'un registre. Aucun autre module ne doit instancier une implémentation concrète.
+`ScenarioSpec` rend interchangeables la table officielle, un scénario de test et un duel. La racine de composition construit `Composition` à partir d'un profil TOML et d'un registre. Aucun autre module ne doit instancier une implémentation concrète.
 
 Exemple de profil :
 
@@ -498,14 +568,20 @@ id = "reseau"
 [reseau]
 id = "mlp"
 modele = "reseau.npz"
+
+[scenario]
+id = "officiel_2027"
 ```
+
+Le profil peut aussi désigner un scénario, qui référence le robot, le terrain, les piles initiales, les obstacles et la graine.
 
 Registre :
 
 ```python
 FABRIQUES = {
     "robot": {"robotronik": "src.robots.robotronik:construire"},
-    "terrain": {"officiel_2027": "src.terrain.officiel_2027:construire"},
+    "terrain": {"officiel_2027": "src.terrains.officiel_2027:construire"},
+    "scenario": {"officiel_2027": "src.evaluation.scenarios:officiel_2027"},
     "planification": {
         "astar": "src.planification.astar:construire",
         "direct": "src.planification.direct:construire",
@@ -646,6 +722,59 @@ construction = "porte" -> {porte, tour, mur}
 | `reseaux/entrainement.py` | `_train_matches`, `_train_endless`, workers. |
 | `reseaux/stockage.py` | `.npz`, métadonnées, migration 96 → 97. |
 
+### 8.1 Autres sous-parties à modulariser
+
+Le plan principal couvre les axes robot, physique, planification, actions, récompense, sélection et réseau. L'analyse du code montre d'autres sous-parties qui resteraient monolithiques. Les classer par **axe de variation** et par **bénéfice de testabilité**, pas par fonction.
+
+#### Priorité haute
+
+| Sous-partie | Aujourd'hui | Cible | Pourquoi |
+| --- | --- | --- | --- |
+| Interface Tkinter | `create_window` fait environ 340 lignes et contient 15 fonctions imbriquées : rendu, clics, clavier, reset, replay, boucle. | `ui/theme.py`, `ui/assets.py`, `ui/canvas_renderer.py`, `ui/manual_controller.py`, `ui/replay_controller.py`, `ui/window.py`. | Le rendu n'est pas testable sans écran, les modes manuel et replay partagent les mêmes branches, et le thème est mélangé à la logique. |
+| Orchestration du match | `play_match` mélange phases, choix de stratégie, enregistrement des frames, retour et construction du replay. `_play_batches` mélange génération de candidats, politique, chargement et déchargement. | `deroulement/runner.py`, `deroulement/recorder.py`, `deroulement/phases.py`, `strategies/candidats.py`. | On doit pouvoir changer la stratégie ou le mode d'enregistrement sans toucher au déroulé du match. |
+| Règlement et barème | `MATCH_SECONDS`, `BUILD_DEADLINE`, `construction_score` (3/5), `throne_room_score` (10/5) sont dispersés dans `simulateur.py` et `match.py`. | `regles/match_2027.py`, `regles/bareme.py`, `regles/phases.py`. | Le score du jeu n'est pas la récompense d'apprentissage. Un changement de saison ou l'ajout des tours/portes doit se faire dans un module de règles. |
+| Entraînement | `Network` porte les poids, l'optimiseur Adam, les moments, les poses de dépôt, la mémoire d'expérience et les compteurs. `_train_endless` et `_train_matches` portent l'orchestration, la mutation, l'évaluation, le reporting et les séries. | `reseaux/optimiseur.py`, `reseaux/memoire.py`, `reseaux/mutation.py`, `reseaux/execution.py`, `reseaux/validation.py`, `reseaux/series.py`, `reseaux/rapport.py`, `reseaux/hyperparametres.py`. | Chaque variante (SGD, autre mutation, mémoire bornée, exécution série/parallèle/factice, reporting silencieux) devient testable et remplaçable. |
+| Caractéristiques et observation | `features()` lit directement `Simulation` et code en dur 97 entrées, 10 piles, les normalisations et les index. | `reseaux/observation.py`, `reseaux/caracteristiques/globales.py`, `piles.py`, `candidats.py`, `normalisation.py`, `schema.py`. | Un nouveau réseau ou une nouvelle observation ne doit pas réécrire l'encodage ni casser les anciens modèles. Le schéma versionné rend la compatibilité explicite. |
+| Préhenseur et approches | `Simulation._capture` code la ventouse, `_pickup_approach` code l'approche sur les deux grands côtés, `_drop_approach` code la dépose. | `domaine/prehenseur.py`, `physique/prehenseur_ventouse.py`, `actions/approche.py`, `actions/depose.py`. | Une pince, une ventouse différente ou un autre nombre de points de prise doit être un module. L'approche est un axe de variation distinct du préhenseur. |
+| Scénario de simulation | `Simulation(obstacles, blocks, robot)` reçoit des tuples bruts ; le terrain, le robot, les piles initiales et la graine sont assemblés à plusieurs endroits. | `domaine/scenario.py` avec `ScenarioSpec` : terrain, robots, obstacles, piles initiales, graine. | Un scénario de test, un scénario officiel et un duel deviennent interchangeables et reproductibles. |
+| Exécution des matchs | `ProcessPoolExecutor` est construit directement dans `train_matches` et `_train_endless`, avec des `map` et des initialisations de signal. | `reseaux/execution.py` : `ExecuteurMatch` série, processus, thread, factice. | Les tests peuvent exécuter sans processus, et les variantes de parallélisme deviennent mesurables. |
+
+#### Priorité moyenne
+
+| Sous-partie | Aujourd'hui | Cible | Pourquoi |
+| --- | --- | --- | --- |
+| Ressources et chemins | `ROBOT_FILE`, `REPLAY_DIR`, `MODEL` et l'image du tapis sont calculés avec `Path(__file__).parents[1]` dans trois modules. | `infra/ressources.py` avec une racine de projet injectable. | Tests, packaging, exécution depuis un autre répertoire et assets alternatifs. |
+| Horloge | `perf_counter` dans l'interface et le CLI, `monotonic` dans le reporting. | `infra/horloge.py` : horloge réelle et horloge factice. | Tests déterministes, replay temporel, reporting contrôlable. |
+| Aléa | `np.random.default_rng` et `SeedSequence` sont créés dans plusieurs fonctions. | `infra/alea.py` : source aléatoire injectable, graines dérivées. | Reproductibilité, comparaison équitable des variantes, tests sans dépendance à NumPy. |
+| Pipeline de replay | `_frame`, `record`, `save_replay`, `Replay` et la lecture Tkinter sont séparés mais imbriqués dans deux modules. | `replay/recorder.py`, `replay/store.py`, `replay/format.py`, `replay/player.py`. | Enregistrer toutes les frames, une sur dix ou aucune devient une politique. Un lecteur sans Tkinter peut être testé. |
+| Coût et rotation de planification | `_route` minimise le temps, `_approach` choisit roulage ou pivot, `WAYPOINT_TIMES` est global. | `planification/cout.py` (`ModeleCout`), `planification/rotation.py`. | Un robot différentiel, un coût énergétique ou un coût de risque sont des variantes. |
+| Catalogue de poses | `CENTERED_DROPS`, `ALTERNATE_DROPS`, `DROP_ANGLES` et les décalages du réseau sont des constantes. | `strategies/poses.py` : `CataloguePoses` centre, décalé, tourné, appris. | Changer la stratégie de dépôt ou ajouter des poses ne doit pas toucher au match. |
+| Physique paramétrable | `PILE_MASS`, les frottements, les joints de freinage et les constantes de mouvement sont dans `simulateur.py`. | `physique/pile.py`, `physique/frottement.py`, `physique/mouvement.py`. | Mesures réelles, autre tapis, autre type de pièce. |
+| Reporting et notification | `print` et `completion_beep` sont appelés directement. | `infra/rapport.py` (`Rapporteur` console, silencieux, JSON) et `infra/notificateur.py`. | Entraînement silencieux, logs structurés, tests sans sortie standard. |
+| CLI | `argparse` est dupliqué dans `match.py` et `reseau.py`. | `cli/match.py`, `cli/train.py`, `cli/replay.py`, `cli/ui.py`, dispatch dans `app.py`. | Les commandes grossissent ; les tests peuvent appeler les handlers sans parser. |
+| Évaluation | `_validated_replay` vérifie un seul replay sur la table officielle. | `evaluation/scenarios.py`, `evaluation/benchmark.py`, `evaluation/metriques.py`. | Comparer deux réseaux, deux récompenses ou deux planificateurs sur un jeu de scénarios et de graines. |
+| Fixtures de test | `test_simulateur.py` utilise des `partial` et de grands littéraux. | `test/fixtures.py` : `SimulationBuilder`, `ReplayBuilder`, `RobotSpecBuilder`. | Tests plus courts, scénarios réutilisables, migration plus sûre. |
+
+#### Priorité basse ou à éviter
+
+| Élément | Recommandation |
+| --- | --- |
+| Helpers purs d'une seule ligne (`edges`, `_finite_number`, etc.) | Les laisser dans leur module ; un module par helper serait du bruit. |
+| Hiérarchie d'exceptions métier | Utile seulement si les CLI et l'interface doivent distinguer plusieurs erreurs. Pas prioritaire. |
+| Types d'unités (`Millimetres`, `Radians`) | Les conventions actuelles sont suffisantes ; des types ajouteraient du bruit. |
+| Cache configurable | Les `lru_cache` actuels suffisent. Ne pas abstraire tant qu'un besoin de mesure n'apparaît pas. |
+| Module par fonction de `match.py` | Regrouper par responsabilité (route, prise, dépose, retour), pas par symbole. |
+
+#### Intégration aux lots
+
+| Lot | Ajouts par rapport au plan initial |
+| --- | --- |
+| A | `ScenarioSpec`, `infra/ressources.py`, `infra/horloge.py`, `infra/alea.py`, `regles/bareme.py`, `regles/phases.py`. |
+| B | `deroulement/runner.py`, `deroulement/recorder.py`, `strategies/candidats.py`, `domaine/prehenseur.py`, `actions/approche.py`, `planification/cout.py`, `strategies/poses.py`. |
+| C | `reseaux/optimiseur.py`, `memoire.py`, `mutation.py`, `execution.py`, `validation.py`, `series.py`, `rapport.py`, `hyperparametres.py`, schéma de caractéristiques, `evaluation/`. |
+| D | Aucun ajout obligatoire ; les nouveaux modules de règles et de physique paramétrable servent aux tours, portes et duels. |
+| E | `ui/*`, `replay/player.py`, `infra/rapport.py`, `infra/notificateur.py`, `cli/*`. |
+
 ## 9. Migration par phases
 
 Chaque phase doit laisser le dépôt vert et le comportement par défaut inchangé. Utiliser une branche par phase ou une branche d'étape avec des commits séparés.
@@ -655,21 +784,26 @@ Chaque phase doit laisser le dépôt vert et le comportement par défaut inchang
 | Symbole actuel | Module cible |
 | --- | --- |
 | `RobotGeometry`, `load_robot` | `domaine/robot.py`, `robots/loader.py` |
-| `START`, `START_BLOCKS`, `WALL_ZONES`, `TOWER_CENTERS`, `THRONE_ROOM` | `terrain/officiel_2027.py` |
+| `START`, `START_BLOCKS`, `WALL_ZONES`, `TOWER_CENTERS`, `THRONE_ROOM` | `terrains/officiel_2027.py` |
 | `edges`, `rectangle_corners`, `travel_time`, `polygon_contact`, `swept_contact`, `table_contact`, `arc_hits_edge` | `domaine/geometrie.py` |
 | `Movement`, `Block`, `SuctionCup` | `domaine/modele.py` |
-| `scoring_zones`, `free_wall_slots`, `construction_score`, `throne_room_score` | `domaine/score.py` |
-| `Simulation`, `_Pile`, `_Grip` | `physique/moteur.py`, `physique/corps.py` |
-| `_route`, `_visibility`, `_approach`, `_turn_envelope`, `_pivot_clear` | `planification/astar.py` |
-| `take_pile`, `place_pile`, `_return_home`, `_follow` | `actions/prise.py`, `actions/depose.py`, `actions/retour.py`, `actions/execution.py` |
+| `scoring_zones`, `free_wall_slots`, `construction_score`, `throne_room_score` | `domaine/score.py` + `regles/bareme.py` |
+| `Simulation`, `_Pile`, `_Grip` | `physique/moteur.py`, `physique/corps.py`, `physique/prehenseur_ventouse.py` |
+| `_route`, `_visibility`, `_approach`, `_turn_envelope`, `_pivot_clear` | `planification/astar.py`, `planification/cout.py`, `planification/rotation.py` |
+| `take_pile`, `place_pile`, `_return_home`, `_follow` | `actions/prise.py`, `actions/depose.py`, `actions/retour.py`, `actions/execution.py`, `actions/approche.py` |
 | `choose_plan` | `selection/glouton.py` + `strategies/reference.py` |
-| `_play_batches` | `strategies/lots.py` |
-| `features` | `reseaux/caracteristiques.py` |
-| `Network` | `reseaux/mlp.py` |
+| `_play_batches` | `strategies/lots.py`, `strategies/candidats.py` |
+| `play_match`, `record`, `_frame` | `deroulement/runner.py`, `deroulement/recorder.py`, `replay/recorder.py` |
+| `features` | `reseaux/observation.py`, `reseaux/caracteristiques/` |
+| `Network` | `reseaux/mlp.py`, `reseaux/optimiseur.py`, `reseaux/memoire.py`, `reseaux/stockage.py` |
 | `MatchPolicy` | `selection/reseau.py` |
-| `_train_matches`, `_train_endless` | `reseaux/entrainement.py` |
-| `Replay`, `save_replay`, `_frame` | `replay/` |
-| `create_window` | `ui/tkinter.py` |
+| `_train_matches`, `_train_endless` | `reseaux/entrainement.py`, `execution.py`, `mutation.py`, `series.py`, `rapport.py` |
+| `Replay`, `save_replay` | `replay/format.py`, `replay/io.py`, `replay/store.py`, `replay/lecture.py`, `replay/player.py` |
+| `create_window` et ses closures | `ui/window.py`, `ui/canvas_renderer.py`, `ui/manual_controller.py`, `ui/replay_controller.py`, `ui/theme.py`, `ui/assets.py` |
+| `perf_counter`, `monotonic` | `infra/horloge.py` |
+| `np.random.default_rng`, `SeedSequence` | `infra/alea.py` |
+| `print`, `completion_beep` | `infra/rapport.py`, `infra/notificateur.py` |
+| `ROBOT_FILE`, `REPLAY_DIR`, `MODEL`, chemin du tapis | `infra/ressources.py` |
 
 ### Phase 0 — Baseline et garde-fous
 
@@ -695,12 +829,12 @@ Actions :
 
 1. Créer `src/domaine/geometrie.py` : `Point`, `Rectangle`, `edges`, `rectangle_corners`, `travel_time`, `polygon_contact`, `swept_contact`, `contact_axes`, `table_contact`, `arc_hits_edge`, `_polygon_bounds`, `_rotated_vertices`, `_footprint_radius`.
 2. Créer `src/domaine/modele.py` : `Movement`, `Block`, `SuctionCup`, `Pose`.
-3. Créer `src/terrain/officiel_2027.py` : `TABLE_WIDTH`, `TABLE_HEIGHT`, `START`, `START_BLOCKS`, `WALL_ZONES`, `TOWER_CENTERS`, `TOWER_RADIUS`, `THRONE_ROOM`.
+3. Créer `src/terrains/officiel_2027.py` : `TABLE_WIDTH`, `TABLE_HEIGHT`, `START`, `START_BLOCKS`, `WALL_ZONES`, `TOWER_CENTERS`, `TOWER_RADIUS`, `THRONE_ROOM`.
 4. Créer `src/domaine/score.py` : `scoring_zones`, `free_wall_slots`, `construction_score`, `throne_room_score`.
 5. Dans `simulateur.py`, importer et réexporter ces symboles pour ne pas casser les tests.
 6. Ne déplacer aucune logique Pymunk.
 
-Vérification : tests verts, match de référence identique, aucun import de `src.terrain` depuis `src.domaine`.
+Vérification : tests verts, match de référence identique, aucun import de `src.terrains` depuis `src.domaine`.
 
 ### Phase 2 — `RobotSpec` et capacités TOML
 
@@ -820,6 +954,23 @@ Actions :
 
 Ces extensions ne doivent pas modifier `physique/`, `domaine/` ni `composition/` au-delà de l'ajout d'un identifiant au registre.
 
+### Phase 9 — Interface, replay et observabilité
+
+**But** : sortir l'interface et le reporting du monolithe, sans changer le comportement visuel.
+
+Actions :
+
+1. Extraire `ui/theme.py` (couleurs, polices, marges) et `ui/assets.py` (chargement et redimensionnement du tapis).
+2. Extraire `ui/canvas_renderer.py` : une fonction de rendu qui reçoit un état d'affichage, sans événement Tkinter.
+3. Extraire `ui/manual_controller.py` : clics, flèches, `Q`/`D`, touches de ventouse, reset, boucle `advance`/`draw`.
+4. Extraire `ui/replay_controller.py` : lecture, pause, reprise, curseur, glisser-déposer.
+5. Extraire `replay/player.py` : état temporel `time`, `start`, `duration`, `frame`, sans Tkinter.
+6. Extraire `infra/rapport.py` et `infra/notificateur.py` : remplacer les `print` et `completion_beep` par un rapporteur injectable.
+7. Extraire `cli/*.py` si `app.py` devient trop gros.
+8. Vérifier manuellement `python -B -m src.interface` : tapis, plein écran, clics, touches, reset et replay.
+
+Critère de sortie : l'interface visuelle est identique, le lecteur de replay est testable sans écran, et le reporting peut être silencieux ou structuré.
+
 ## 10. Vérification
 
 ### 10.1 Tests de caractérisation
@@ -920,6 +1071,10 @@ La modularisation est considérée terminée lorsque :
 - ajouter une récompense ne demande qu'un module `recompenses/<id>.py` ;
 - ajouter un sélecteur ne demande qu'un module `selection/<id>.py` ;
 - ajouter un réseau ne demande qu'un module `reseaux/<id>.py` et, si nécessaire, un encodeur ;
+- ajouter un scénario, un terrain ou un barème ne demande qu'un module de données ou de règles ;
+- changer la politique d'enregistrement, de reporting ou d'exécution des matchs ne demande qu'un module d'infrastructure ;
+- l'interface est découpée en rendu, contrôleur manuel, lecteur de replay, thème et assets, et le lecteur de replay est testable sans écran ;
+- l'entraînement peut s'exécuter en série, sans processus, sans bip et sans sortie standard ;
 - le comportement par défaut est identique à la baseline ;
 - les tests de permutation, de capacité et d'isolation passent ;
 - les anciennes commandes et les anciens modèles/replays fonctionnent ;
