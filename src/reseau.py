@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import signal
 from tempfile import NamedTemporaryFile
+from time import monotonic
 
 import numpy as np
 from pymunk import Vec2d
@@ -281,6 +282,16 @@ def _replay_rank(replay):
     return replay["score"], -replay["duree"]
 
 
+def _format_elapsed(seconds):
+    hours, rest = divmod(int(seconds), 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes:02d} min"
+    if minutes:
+        return f"{minutes} min {seconds:02d} s"
+    return f"{seconds} s"
+
+
 def _validated_replay(network, rank, seed):
     replay = play_match(Simulation(), policy=MatchPolicy(network))
     if _replay_rank(replay) != rank:
@@ -341,19 +352,31 @@ def train_matches(count, seed, incumbent=None, *, resume=False):
 
 
 def _train_endless(seed, model, incumbent, *, resume):
+    started = monotonic()
     saved_rank = None
+    improved_at = None
     session_best = None
     series = 1
     seeds = np.random.SeedSequence(seed)
     workers = _training_workers(PROGRESS_WINDOW)
 
     def record(network, rank):
-        nonlocal saved_rank, session_best
+        nonlocal saved_rank, improved_at, session_best
         if session_best is None or rank > session_best[1]:
             session_best = (network, rank, seed, series)
         if saved_rank is None or rank > saved_rank:
             network.save(model)
             saved_rank = rank
+            improved_at = monotonic()
+
+    def status(*, generation, played, batch, stalled):
+        rank = saved_rank if saved_rank is not None else batch
+        since = (f"aucune amélioration depuis {_format_elapsed(monotonic() - started)}"
+                 if improved_at is None else f"amélioration il y a {_format_elapsed(monotonic() - improved_at)}")
+        print(f"Série {series} · génération {generation} · {played} matchs"
+              f" · record {rank[0]} pts en {-rank[1]:.2f} s"
+              f" · meilleur du lot {batch[0]} pts en {-batch[1]:.2f} s"
+              f" · {since} · stagnation {stalled}/{PROGRESS_WINDOW}", flush=True)
 
     try:
         if incumbent is not None:
@@ -364,8 +387,11 @@ def _train_endless(seed, model, incumbent, *, resume):
             run_matches = pool.map if pool else map
             starting_network = incumbent if resume else None
             while True:
+                print(f"Série {series} · graine {seed} · "
+                      f"{'reprise du modèle' if starting_network is not None else 'nouveau réseau aléatoire'}",
+                      flush=True)
                 _train_matches(None, seed, starting_network, starting_network is not None,
-                               workers, run_matches, on_record=record)
+                               workers, run_matches, on_record=record, on_generation=status)
                 series += 1
                 seed = int(seeds.spawn(1)[0].generate_state(1)[0])
                 starting_network = None
@@ -380,13 +406,15 @@ def _train_endless(seed, model, incumbent, *, resume):
         print(f"Session · {rank[0]} points en {-rank[1]:.2f} s · replay {number}", flush=True)
 
 
-def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_record=None):
+def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_record=None,
+                   on_generation=None):
     endless = count is None
     rng = np.random.default_rng(seed)
     mutation_rng = np.random.default_rng(seed)
     network = incumbent if resume else Network(rng)
     network_rank = None
     stalled = 0
+    generation = 0
     experience = incumbent.experience.copy() if incumbent is not None else {}
     previous_matches = incumbent.training_matches if incumbent is not None else 0
     played = previous_matches if resume else 0
@@ -396,6 +424,7 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
     examples = deque(maxlen=512)
     start = 0
     while endless or start < count:
+        generation += 1
         remaining = PROGRESS_WINDOW - stalled if endless else count - start
         size = min(workers, remaining)
         stop = start + size
@@ -437,8 +466,11 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
         previous_rank = network_rank
         jobs = ((candidate._for_simulation(), None, False, False, False) for candidate in candidates)
         results = run_matches(_simulate_match, jobs)
+        batch_rank = None
         for candidate, (replay, _) in zip(candidates, results, strict=True):
             rank = _replay_rank(replay)
+            if batch_rank is None or rank > batch_rank:
+                batch_rank = rank
             if previous_rank is None:
                 previous_rank = rank
             if network_rank is None or rank > network_rank:
@@ -450,6 +482,9 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
                 network.experience = experience
                 network.training_matches = previous_matches + stop
                 on_record(network, network_rank)
+            if on_generation is not None:
+                on_generation(generation=generation, played=previous_matches + stop,
+                              batch=batch_rank, stalled=stalled)
             if stalled == PROGRESS_WINDOW:
                 break
         start = stop

@@ -163,7 +163,15 @@ class TrainingReplayTest(unittest.TestCase):
         self.assertEqual([path.name for path in paths], ["essai-0001-51pts-25.00s.json"])
         self.assertEqual(replays[0]["serie"], 1)
         self.assertEqual(_replay_rank(replays[0]), (51, -25))
-        output.assert_called_once_with("Session · 51 points en 25.00 s · replay 1", flush=True)
+        lines = [call.args[0] for call in output.call_args_list]
+        self.assertTrue(all(call.kwargs == {"flush": True} for call in output.call_args_list))
+        self.assertEqual(lines[-1], "Session · 51 points en 25.00 s · replay 1")
+        self.assertEqual(sum("graine" in line for line in lines), 3)
+        generations = [line for line in lines if "génération" in line]
+        self.assertTrue(generations[0].startswith("Série 1 · génération 1 · 52 matchs"), generations[0])
+        self.assertIn("record 51 pts en 25.00 s", generations[1], generations[1])
+        self.assertTrue(generations[-1].startswith("Série 2 · génération 18 · 53 matchs"), generations[-1])
+        self.assertTrue(generations[-1].endswith("stagnation 50/50"), generations[-1])
 
     def test_deposit_mutations_are_kept_only_when_the_autonomous_match_improves(self):
         incumbent = Network(np.random.default_rng(0))
