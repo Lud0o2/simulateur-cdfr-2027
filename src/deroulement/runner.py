@@ -12,7 +12,7 @@ from ..strategies.poses import (
 from ..strategies.reference import _play_reference
 
 
-def play_match(simulation: Simulation, *, batches=False, policy=None, record_frames=True):
+def play_match(simulation: Simulation, *, batches=False, policy=None, record_frames=True, planner=None):
     batches = batches or policy is not None
     frames = []
 
@@ -37,11 +37,11 @@ def play_match(simulation: Simulation, *, batches=False, policy=None, record_fra
         angles = tuple(min(DROP_ANGLES, key=lambda candidate: abs(remainder(candidate - angle, pi)))
                        for angle in angles)
         drop_poses = _shifted_drops(offsets, angles) if offsets else CENTERED_DROPS
-        _play_batches(simulation, record, policy, tuple(dict.fromkeys((*drop_poses, *ALTERNATE_DROPS))))
+        _play_batches(simulation, record, policy, tuple(dict.fromkeys((*drop_poses, *ALTERNATE_DROPS))), planner=planner)
     else:
         _play_reference(simulation, record)
 
-    _return_home(simulation, record)
+    _return_home(simulation, record, planner=planner)
     bonus = simulation.return_score
     record(f"Fin du match · Retour +{bonus}" if bonus else "Fin du match", bonus)
     replay = {"obstacles": simulation.obstacles, "frames": frames,

@@ -44,3 +44,7 @@ TERRAIN = TerrainSpec(
     tower_radius=TOWER_RADIUS,
     initial_blocks=START_BLOCKS,
 )
+
+
+def construire():
+    return TERRAIN

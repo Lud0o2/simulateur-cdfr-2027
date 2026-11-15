@@ -83,18 +83,38 @@ Le bonus n'est calculé que lorsque le robot est à l'arrêt.
 Le robot est défini par `RobotRobotronik.toml` :
 
 ```toml
+nom = "Robotronik"
+planificateur = "astar"
+
 contour_mm = [[x1, y1], [x2, y2], [x3, y3], ...]
+
+[mouvement]
+type = "holonome"
+vitesse_mm_s = 1000
+acceleration_mm_s2 = 1000
+vitesse_rotation_rad_s = 6.283185307179586
+acceleration_rotation_rad_s2 = 1200
+pas_rotation_rad = 0.2617993877991494
+rotation_sur_place = true
+deplacement_lateral = true
+masse_kg = 5.0
 
 [[ventouses]]
 position_mm = [x, y]
 angle_deg = 0
+construction = "mur"     # mur | tour | porte
 ```
 
 - `contour_mm` : contour convexe, ordre du périmètre, au moins trois sommets, sans sommets alignés.
 - `position_mm` : position de la ventouse dans le repère du robot.
 - `angle_deg` : direction de la ventouse, `0°` vers +X.
+- `construction` : capacité de construction de la ventouse, `mur` par défaut.
+- `planificateur` : identifiant du planificateur associé, `astar` par défaut.
+- `[mouvement]` : vitesses, accélérations, pas de rotation, type de base et masse ; les valeurs absentes reprennent les constantes actuelles.
 - Les ventouses sont numérotées de `1` à `N` dans l'ordre des blocs.
 - Le contour doit tenir dans la table lorsque le robot est à `START = (250, 1000)`.
+
+Les capacités suivent la fermeture demandée : `mur` ne construit que des murs, `tour` construit des tours et des murs, `porte` construit des portes, des tours et des murs. Le score des tours et des portes reste à préciser avec le règlement.
 
 Le robot par défaut est un triangle équilatéral de 380 mm de côté avec quatre ventouses : deux à l'avant (`y = ±100`) et deux sur les côtés (`angle = ±120°`).
 
@@ -297,7 +317,7 @@ Les dimensions du terrain, des piles, des remparts, des tours et de la salle du 
 
 - Un seul robot, sans adversaire.
 - Pas de base différentielle : le robot est holonome et peut se déplacer dans n'importe quelle direction.
-- Pas de construction de murs, de tours ou de portes comme actions distinctes : seules les déposes de piles dans les zones sont modélisées.
+- Les capacités `tour` et `porte` sont décrites dans le TOML, mais les actions de construction correspondantes et leur score ne sont pas encore implémentés.
 - Pas de fautes, de contacts interdits ni d'arbitrage.
 - Pas d'interface avec le robot réel.
 - Pas de rejeu déterministe à partir du replay : le replay ne contient que l'affichage.

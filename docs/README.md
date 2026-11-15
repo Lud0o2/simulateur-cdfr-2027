@@ -10,7 +10,7 @@ Cette documentation s'adresse aux développeurs et aux assistants LLM qui doiven
 | 2 | [`architecture.md`](architecture.md) | Comprendre les flux d'exécution et les dépendances entre modules. |
 | 3 | [`structure.md`](structure.md) | Localiser un symbole, un fichier ou une responsabilité. |
 | 4 | [`domaine-et-regles.md`](domaine-et-regles.md) | Comprendre les unités, la géométrie, les actions et le score. |
-| 5 | [`plan-modularisation.md`](plan-modularisation.md) | Préparer le découpage en modules interchangeables (proposition, pas encore implémenté). |
+| 5 | [`plan-modularisation.md`](plan-modularisation.md) | Comprendre le découpage appliqué et les points restants. |
 
 Si vous ne lisez qu'un seul fichier avant de modifier du code, lisez [`contexte-llm.md`](contexte-llm.md) puis la section concernée de [`structure.md`](structure.md).
 
@@ -57,7 +57,7 @@ Avec l'environnement fourni dans ce dépôt, remplacer `python` par `.venv/bin/p
 
 ## État de cette documentation
 
-Les documents `contexte-llm.md`, `architecture.md`, `structure.md` et `domaine-et-regles.md` décrivent l'état courant du code. Le document `plan-modularisation.md` est une proposition : il ne décrit pas du code déjà présent et ne doit pas être pris pour une API existante.
+Les documents `contexte-llm.md`, `architecture.md`, `structure.md` et `domaine-et-regles.md` décrivent l'état courant du code. Le document `plan-modularisation.md` décrit l’état appliqué et liste les points restants.
 
 Pour vérifier la version décrite :
 

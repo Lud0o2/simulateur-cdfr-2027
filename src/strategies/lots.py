@@ -40,7 +40,7 @@ def _drop_pose_table(shape: tuple[Vec2d, ...], drop_poses):
     return tuple(table)
 
 
-def _play_batches(simulation, record, policy, drop_poses):
+def _play_batches(simulation, record, policy, drop_poses, planner=None):
     """Charge les ventouses disponibles et dépose les piles une par une."""
     def perform(action, label, **choice):
         def advance(seconds):
@@ -67,7 +67,7 @@ def _play_batches(simulation, record, policy, drop_poses):
                 for cup in free_cups:
                     if (index, cup) in missed:
                         continue
-                    approach = _pickup_approach(simulation, block, cup, state)
+                    approach = _pickup_approach(simulation, block, cup, state, planner=planner)
                     if approach is not None:
                         approaches[index, cup] = approach
                         choices.append((approach.duration, index, cup))
@@ -146,7 +146,7 @@ def _play_batches(simulation, record, policy, drop_poses):
 
                 angles = (angle, angle + pi) if policy is None else (angle,)
                 if any(place_pile(simulation, cup, site.x, site.y, drop_angle, advance=advance_deposit,
-                                  deadline=BUILD_DEADLINE, on_release=record_deposit)
+                                  deadline=BUILD_DEADLINE, on_release=record_deposit, planner=planner)
                        for drop_angle in angles if simulation.time < BUILD_DEADLINE):
                     if policy is not None:
                         policy.observe(choice)

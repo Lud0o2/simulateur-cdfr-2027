@@ -1,348 +1,37 @@
-"""Entraîne et évalue le réseau de l'étape 5 sur des matchs simulés."""
+"""Entraînement et évaluation du réseau sur des matchs simulés."""
 
 import argparse
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
-from copy import copy
-from math import cos, hypot, pi, remainder, sin
 import os
 from pathlib import Path
 import signal
-from tempfile import NamedTemporaryFile
 from time import monotonic
 
 import numpy as np
-from pymunk import Vec2d
 
-from .match import (
-    ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES, MATCH_SECONDS, REPLAY_DIR, _action_state, _drop_target,
-    _pickup_approach, _rotated_footprint, _visibility, _wall_drop_zones,
-    completion_beep, play_match, save_replay,
+from .infra.notificateur import completion_beep
+from .infra.ressources import MODELE, REPLAY_DIR
+from .match import play_match, save_replay
+from .physique.moteur import Simulation
+from .regles.phases import MATCH_SECONDS
+from .reseaux.base import ACTION_DISTANCE, LAYERS, PICKUP_LIMIT, TABLE_DIAGONAL
+from .reseaux.caracteristiques import features
+from .reseaux.mlp import (
+    ADAM_BETAS, ADAM_EPSILON, BATCH_SIZE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, EPOCHS,
+    LEARNING_RATE, LEARNING_RATE_FLOOR, LEARNING_RATE_HALVING, MAX_STEPS, MOMENT_NAMES,
+    Network, _learning_rate,
 )
-from .simulateur import Block, START_BLOCKS, TABLE_HEIGHT, TABLE_WIDTH, WALL_ZONES, Simulation, free_wall_slots, scoring_zones
+from .reseaux.mutation import _mutate_drop_pose
+from .evaluation.metriques import _format_elapsed, _match_rank, _replay_rank
+from .selection.reseau import MatchPolicy
+from .strategies.poses import ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES
 
 
-LAYERS = (97, 16, 8, 1)
-TABLE_DIAGONAL = hypot(TABLE_WIDTH, TABLE_HEIGHT)
-ACTION_DISTANCE = 84
-MODEL = REPLAY_DIR.parent / "reseau.npz"
-PICKUP_LIMIT = 8
 EXPLORATION_INTERVAL = 8
 PROGRESS_WINDOW = 50  # matchs d'entraînement sans nouveau record autonome
-DROP_OFFSET_LIMIT = 200  # mm depuis le centre du rempart
-CENTERED_OFFSETS = ((0, 0),) * len(CENTERED_DROPS)
-BATCH_SIZE = 64
-EPOCHS = 8  # passages sur les exemples mémorisés par mise à jour
-MAX_STEPS = 64
-LEARNING_RATE = 0.002
-LEARNING_RATE_FLOOR = 0.0002
-LEARNING_RATE_HALVING = 200  # matchs d'entraînement entre deux divisions du pas
-ADAM_BETAS = (0.9, 0.999)
-ADAM_EPSILON = 1e-8
-MOMENT_NAMES = ("moment_w", "variance_w", "moment_b", "variance_b")
-
-
-def _learning_rate(training_matches):
-    # Un réseau déjà éprouvé bouge moins qu'une initialisation aléatoire.
-    return max(LEARNING_RATE_FLOOR, LEARNING_RATE * 0.5 ** (max(0, training_matches) // LEARNING_RATE_HALVING))
-
-
-def _read_drop_offsets(values):
-    if (not isinstance(values, (list, tuple)) or len(values) != len(CENTERED_DROPS)
-            or any(not isinstance(offset, (list, tuple)) or len(offset) != 2
-                   or not all(type(value) in (int, float) and abs(value) <= DROP_OFFSET_LIMIT for value in offset)
-                   or hypot(*offset) > DROP_OFFSET_LIMIT for offset in values)):
-        raise ValueError("Décalages de dépôt invalides.")
-    return tuple(map(tuple, values))
-
-
-def _read_drop_angles(values):
-    if (not isinstance(values, (list, tuple)) or len(values) != len(ALIGNED_ANGLES)
-            or not all(type(angle) in (int, float) and abs(angle) <= pi / 2 for angle in values)):
-        raise ValueError("Angles de dépôt invalides.")
-    return tuple(values)
-
-
-def _pose(position, angle):
-    x, y = position
-    return x / TABLE_WIDTH, y / TABLE_HEIGHT, cos(angle), sin(angle)
-
-
-def features(simulation, held, choices, *, pickup, pickup_plans=None):
-    blocks = simulation.blocks
-    carried = set(held.values())
-    state = [*_pose(simulation.position, simulation.heading),
-             (MATCH_SECONDS - simulation.time) / MATCH_SECONDS, simulation.score / 80,
-             len(held) / len(simulation.geometry.mounts)]
-    built = 0
-    for index, block in enumerate(blocks[:10]):
-        is_held = index in carried
-        in_zone = not is_held and scoring_zones(block)[1]
-        x, y = block.position
-        in_stock = not is_held and any(left <= x <= right and top <= y <= bottom
-                                       for left, top, right, bottom in START_BLOCKS)
-        built += in_zone
-        state.extend((*_pose(block.position, block.angle), in_stock, is_held, in_zone))
-    state.extend([0] * (7 * max(0, 10 - len(blocks))))
-    slots = free_wall_slots(block for index, block in enumerate(blocks) if index not in carried)
-    state.extend(((len(blocks) - len(held) - built) / 10, (len(WALL_ZONES) - slots) / len(WALL_ZONES)))
-
-    rows = []
-    action_state = None
-    for choice in choices:
-        if choice is None:
-            # Termine le chargement si une ventouse est occupée, ou demande le retour.
-            rows.append([-1, *([0] * (LAYERS[0] - len(state) - 1))])
-            continue
-        if action_state is None:
-            action_state = _action_state(simulation)
-        start, footprints, obstacles = action_state
-        if pickup:
-            duration, index, cup = choice
-            block = blocks[index]
-            position, angle = block.position, block.angle
-            gain = 0
-            plan = (pickup_plans[index, cup] if pickup_plans is not None
-                    else _pickup_approach(simulation, block, cup, action_state))
-            distance = plan.distance_from(start) if plan is not None else -TABLE_DIAGONAL
-        else:
-            gain, duration, cup, position, angle = choice
-            block = blocks[held[cup]]
-            end, turn = _drop_target(block, Vec2d(*position), angle, start)
-            polygon = tuple(tuple(end + (Vec2d(*corner) - start).rotated(turn)) for corner in block.corners)
-            # Évalue la pose finale. Le simulateur calcule le trajet seulement pour une pose essayée.
-            distance = -TABLE_DIAGONAL
-            if _wall_drop_zones(Block(tuple(position), block.angle + turn, polygon))[1]:
-                rotated = tuple(_rotated_footprint(shape, turn) for shape in footprints)
-                if _visibility(rotated, obstacles, 0)(end, end):
-                    distance = start.get_distance(end)
-        mount, facing = simulation.geometry.mounts[cup - 1]
-        rows.append([pickup, *_pose(block.position, block.angle), distance / TABLE_DIAGONAL, *_pose(position, angle),
-                     *(value / 380 for value in mount), *facing, duration / 8, gain / 8,
-                     (position[0] - simulation.position[0]) / TABLE_WIDTH,
-                     (position[1] - simulation.position[1]) / TABLE_HEIGHT])
-    inputs = np.empty((len(rows), LAYERS[0]), dtype=np.float32)
-    inputs[:, :len(state)] = state
-    inputs[:, len(state):] = np.asarray(rows, dtype=np.float32).reshape(len(rows), LAYERS[0] - len(state))
-    return inputs
-
-
-def _candidate_count(choices, pickup):
-    return min(PICKUP_LIMIT, len(choices)) if pickup else len(choices)
-
-
-class Network:
-    def __init__(self, rng):
-        self.weights = [rng.normal(0, (2 / size) ** 0.5, (size, width)).astype(np.float32)
-                        for size, width in zip(LAYERS, LAYERS[1:])]
-        self.biases = [np.zeros(width, dtype=np.float32) for width in LAYERS[1:]]
-        self.moments = [[np.zeros_like(weights), np.zeros_like(weights),
-                         np.zeros_like(biases), np.zeros_like(biases)]
-                        for weights, biases in zip(self.weights, self.biases)]
-        self.updates = 0
-        self.drop_offsets = CENTERED_OFFSETS
-        self.drop_angles = ALIGNED_ANGLES
-        self.experience = {}
-        self.training_matches = 0
-
-    def _forward(self, inputs):
-        values = [inputs]
-        for index, (weights, biases) in enumerate(zip(self.weights, self.biases)):
-            layer = values[-1] @ weights + biases
-            values.append(np.maximum(layer, 0) if index < len(self.weights) - 1 else layer)
-        return values
-
-    def predict(self, inputs):
-        return self._forward(inputs)[-1][:, 0]
-
-    def _learn(self, values, gradient, learning_rate):
-        self.updates += 1
-        first = 1 - ADAM_BETAS[0] ** self.updates
-        second = 1 - ADAM_BETAS[1] ** self.updates
-        for layer in reversed(range(len(self.weights))):
-            weights = self.weights[layer]
-            previous = (gradient @ weights.T) * (values[layer] > 0) if layer else None
-            moment, variance, bias_moment, bias_variance = self.moments[layer]
-            self._apply(weights, moment, variance, values[layer].T @ gradient, learning_rate, first, second)
-            self._apply(self.biases[layer], bias_moment, bias_variance, gradient.sum(axis=0),
-                        learning_rate, first, second)
-            gradient = previous
-
-    @staticmethod
-    def _apply(parameter, moment, variance, gradient, learning_rate, first, second):
-        # Adam normalise chaque paramètre par la moyenne et la variance de son gradient.
-        moment *= ADAM_BETAS[0]
-        moment += (1 - ADAM_BETAS[0]) * gradient
-        variance *= ADAM_BETAS[1]
-        variance += (1 - ADAM_BETAS[1]) * gradient * gradient
-        parameter -= learning_rate * (moment / first) / (np.sqrt(variance / second) + ADAM_EPSILON)
-
-    def train(self, inputs, targets, rng, *, learning_rate=LEARNING_RATE):
-        batch = min(BATCH_SIZE, len(inputs))
-        # Un budget en époques évite de mémoriser un lot de quelques lignes.
-        steps = max(1, min(MAX_STEPS, round(EPOCHS * len(inputs) / batch)))
-        for _ in range(steps):
-            sample = rng.integers(len(inputs), size=batch)
-            values = self._forward(inputs[sample])
-            gradient = 2 * (values[-1] - targets[sample, None]) / len(sample)
-            self._learn(values, gradient, learning_rate)
-
-    def _training_copy(self):
-        candidate = copy(self)
-        candidate.weights = [weights.copy() for weights in self.weights]
-        candidate.biases = [biases.copy() for biases in self.biases]
-        candidate.moments = [[values.copy() for values in layer] for layer in self.moments]
-        return candidate
-
-    def _for_simulation(self):
-        if not self.experience:
-            return self
-        network = copy(self)
-        network.experience = {}
-        return network
-
-    def save(self, path):
-        # Deux indices d'ouverture, le score, le temps négatif, puis les entrées et la cible.
-        experience = [np.column_stack((np.broadcast_to((*opening, *rank), (len(rows), 4)), rows))
-                      for opening, (rank, rows) in self.experience.items()]
-        moments = {f"adam_{name}_{index}": value
-                   for index, layer in enumerate(self.moments)
-                   for name, value in zip(MOMENT_NAMES, layer)}
-        file = NamedTemporaryFile(dir=path.parent, suffix=".npz", delete=False)
-        temporary = Path(file.name)
-        try:
-            with file:
-                np.savez(file, *self.weights, *self.biases, drop_offsets=np.asarray(self.drop_offsets),
-                         drop_angles=np.asarray(self.drop_angles),
-                         experience=np.concatenate(experience) if experience else np.empty((0, LAYERS[0] + 5)),
-                         training_matches=self.training_matches, adam_updates=self.updates, **moments)
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    @classmethod
-    def load(cls, path):
-        network = cls(np.random.default_rng(0))
-        with np.load(path, allow_pickle=False) as data:
-            presence_bias = 0
-            for index, values in enumerate((*network.weights, *network.biases)):
-                loaded = data[f"arr_{index}"]
-                if index == 0 and loaded.shape == (LAYERS[0] - 1, LAYERS[1]):
-                    if loaded.dtype != values.dtype or not np.all(np.isfinite(loaded)):
-                        raise ValueError("Paramètres du réseau invalides.")
-                    # Les anciennes lignes de présence sont reprises par le biais.
-                    presence_bias = loaded[11:77:7].sum(axis=0)
-                    loaded = np.insert(loaded, ACTION_DISTANCE, 0, axis=0)
-                    loaded[11:77:7] = 0
-                    loaded[78] /= 2
-                if loaded.shape != values.shape or loaded.dtype != values.dtype or not np.all(np.isfinite(loaded)):
-                    raise ValueError("Paramètres du réseau invalides.")
-                values[:] = loaded
-            network.biases[0] += presence_bias
-            if not np.all(np.isfinite(network.biases[0])):
-                raise ValueError("Paramètres du réseau invalides.")
-            if "drop_offsets" in data:
-                network.drop_offsets = _read_drop_offsets(data["drop_offsets"].tolist())
-            if "drop_angles" in data:
-                network.drop_angles = _read_drop_angles(data["drop_angles"].tolist())
-            if "experience" in data:
-                rows = data["experience"]
-                if (rows.ndim != 2 or rows.shape[1] != LAYERS[0] + 5 or rows.dtype != np.float64
-                        or not np.all(np.abs(rows) <= np.finfo(np.float32).max)
-                        or not np.all((rows[:, :2] == np.trunc(rows[:, :2]))
-                                      & (rows[:, :2] >= -1) & (rows[:, :2] < len(START_BLOCKS)))):
-                    raise ValueError("Mémoire d’entraînement invalide.")
-                for opening in np.unique(rows[:, :2], axis=0):
-                    group = rows[np.all(rows[:, :2] == opening, axis=1)]
-                    network.experience[tuple(map(int, opening))] = (tuple(group[0, 2:4]), group[:, 4:].astype(np.float32))
-            if "training_matches" in data:
-                count = data["training_matches"].tolist()
-                if type(count) is not int or count < 0:
-                    raise ValueError("Compteur d’entraînement invalide.")
-                network.training_matches = count
-            for index, layer in enumerate(network.moments):
-                for name, target in zip(MOMENT_NAMES, layer):
-                    key = f"adam_{name}_{index}"
-                    if key not in data:
-                        continue
-                    loaded = data[key]
-                    if loaded.shape != target.shape or loaded.dtype != target.dtype or not np.all(np.isfinite(loaded)):
-                        raise ValueError("Paramètres du réseau invalides.")
-                    target[:] = loaded
-            if "adam_updates" in data:
-                count = data["adam_updates"].tolist()
-                if type(count) is not int or count < 0:
-                    raise ValueError("Compteur d’entraînement invalide.")
-                network.updates = count
-        return network
-
-
-class MatchPolicy:
-    def __init__(self, network, *, rng=None, warmup=False, resume=False, random_match=False):
-        self.network = network
-        self.rng = rng
-        self.warmup = warmup
-        self.resume = resume
-        self.history = []
-        self.opening = []
-        self.random_match = random_match
-        self.drop_offsets = getattr(network, "drop_offsets", CENTERED_OFFSETS)
-        self.drop_angles = getattr(network, "drop_angles", ALIGNED_ANGLES)
-
-    def order(self, simulation, held, choices, *, pickup, can_finish=False, pickup_plans=None):
-        # shortcut: le réseau classe les huit prises les plus rapides, à élargir si elles bloquent l'exploration.
-        limit = len(choices) if self.random_match else _candidate_count(choices, pickup)
-        head = choices[:limit]
-        if can_finish and (held or not self.random_match):
-            head.append(None)
-        inputs = features(simulation, held, head, pickup=pickup, pickup_plans=pickup_plans)
-        if self.rng is not None:
-            self.rows = dict(zip(head, inputs))
-            self.score_before = simulation.score
-            self.pickup = pickup
-        if self.random_match:
-            return [head[index] for index in self.rng.permutation(len(head))]
-        order = np.argsort(-self.network.predict(inputs), kind="stable")
-        if self.rng is not None:
-            if self.resume:
-                if len(order) > 1 and self.rng.random() < 0.30:
-                    alternatives = order[1:5].tolist()
-                    if pickup and held:
-                        preferred = head[order[0]]
-                        fastest = next((index for index, choice in enumerate(head)
-                                        if choice is not None and (preferred is None or choice[1] != preferred[1])),
-                                       None)
-                        if fastest is not None and fastest not in alternatives:
-                            alternatives[-1] = fastest
-                    alternate = self.rng.choice(alternatives)
-                    rank = int(np.flatnonzero(order == alternate)[0])
-                    order[0], order[rank] = alternate, order[0]
-            elif self.rng.random() < 0.25:
-                order = self.rng.permutation(len(head))
-            elif self.warmup or self.rng.random() < 0.2:
-                return choices
-        return [head[index] for index in order] + choices[limit:]
-
-    def observe(self, choice):
-        if self.rng is not None and choice in self.rows:
-            self.history.append((self.rows[choice], self.score_before))
-            if self.pickup and choice is not None and len(self.opening) < 2:
-                self.opening.append(choice[1])
-
-
-def _replay_rank(replay):
-    return replay["score"], -replay["duree"]
-
-
-def _format_elapsed(seconds):
-    hours, rest = divmod(int(seconds), 3600)
-    minutes, seconds = divmod(rest, 60)
-    if hours:
-        return f"{hours} h {minutes:02d} min"
-    if minutes:
-        return f"{minutes} min {seconds:02d} s"
-    return f"{seconds} s"
+MODEL = MODELE
 
 
 def _validated_replay(network, rank, seed):
@@ -361,27 +50,6 @@ def _simulate_match(job):
     if policy.opening and replay["score"] > replay["score_retour"]:
         replay["ouverture"] = tuple((policy.opening + [-1])[:2])
     return replay, policy.history
-
-
-def _mutate_drop_pose(network, rng):
-    mutant = copy(network)
-    wall = int(rng.integers(len(CENTERED_DROPS)))
-    if rng.random() < 0.5:
-        angles = list(network.drop_angles)
-        choices = [angle for angle in DROP_ANGLES if remainder(angle - angles[wall], pi) != 0]
-        angles[wall] = choices[int(rng.integers(len(choices)))]
-        mutant.drop_angles = tuple(angles)
-    else:
-        offsets = list(network.drop_offsets)
-        x, y = offsets[wall]
-        choices = [(x + dx, y + dy) for step in (20, 40, 60, 100, 150, DROP_OFFSET_LIMIT)
-                   for dx, dy in ((step, 0), (-step, 0), (0, step), (0, -step))
-                   if hypot(x + dx, y + dy) <= DROP_OFFSET_LIMIT]
-        if x or y:
-            choices.append((0, 0))
-        offsets[wall] = choices[int(rng.integers(len(choices)))]
-        mutant.drop_offsets = tuple(offsets)
-    return mutant
 
 
 def _training_workers(count):

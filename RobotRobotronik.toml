@@ -1,3 +1,6 @@
+nom = "Robotronik"
+planificateur = "astar"
+
 # Repère du robot en mm : +X vers l’avant, +Y vers le bas à l’orientation initiale.
 # Indiquer les sommets du contour convexe dans l’ordre du périmètre.
 contour_mm = [
@@ -5,19 +8,35 @@ contour_mm = [
     [109.69655114602888, -190],
     [109.69655114602888, 190],
 ]
+
+[mouvement]
+type = "holonome"
+vitesse_mm_s = 1000
+acceleration_mm_s2 = 1000
+vitesse_rotation_rad_s = 6.283185307179586
+acceleration_rotation_rad_s2 = 1200
+pas_rotation_rad = 0.2617993877991494
+rotation_sur_place = true
+deplacement_lateral = true
+masse_kg = 5.0
+
 # L’ordre des blocs donne les numéros. À 0°, la ventouse pointe vers l’avant.
 [[ventouses]] # 1 — avant, côté -Y
 position_mm = [109.69655114602888, -100]
 angle_deg = 0
+construction = "mur"
 
 [[ventouses]] # 2 — côté +Y
 position_mm = [-37.52776749732564, 105]
 angle_deg = 120
+construction = "mur"
 
 [[ventouses]] # 3 — côté -Y
 position_mm = [-37.52776749732564, -105]
 angle_deg = -120
+construction = "mur"
 
 [[ventouses]] # 4 — avant, côté +Y
 position_mm = [109.69655114602888, 100]
 angle_deg = 0
+construction = "mur"

@@ -10,9 +10,10 @@ from ..regles.phases import FRAME_STEP, MATCH_SECONDS
 from ..regles.score_2027 import throne_room_score
 from ..terrains.officiel_2027 import START, THRONE_ROOM
 from .execution import _action_state, _follow
+from .approche import _planifier
 
 
-def _return_home(simulation, record):
+def _return_home(simulation, record, planner=None):
     deadline = MATCH_SECONDS - FRAME_STEP  # Une arrivée au buzzer doit déjà être à l'arrêt.
     if simulation.time >= deadline:
         return
@@ -48,14 +49,14 @@ def _return_home(simulation, record):
             direct = _segment_time(start, target)
             if best is not None and direct >= best.duration:
                 continue
-            route = _approach(start, target, turn, footprints, obstacles)
+            route = _planifier(planner, start, target, turn, footprints, obstacles)
             if (route is not None and simulation.time + route.duration <= deadline
                     and (best is None or route.duration < best.duration)):
                 best = route
         if best is not None:
             if (_follow(simulation, best, advance=advance, deadline=deadline)
                     and current == 0 and simulation.return_score == 5):
-                _return_home(simulation, record)
+                _return_home(simulation, record, planner=planner)
             return
 
 

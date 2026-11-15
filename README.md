@@ -25,6 +25,16 @@ Depuis la racine du dépôt, installe les dépendances Python. Pour le pilotage 
 python -m pip install -r requirements.txt
 ```
 
+**Utiliser l’application unifiée**
+
+```powershell
+python -B -m src.app match
+python -B -m src.app replay
+python -B -m src.app ui
+```
+
+Les commandes historiques `python -B -m src.match`, `python -B -m src.reseau` et `python -B -m src.interface` restent disponibles.
+
 **Jouer un match de référence, puis ouvrir son replay**
 
 ```powershell
@@ -111,16 +121,21 @@ Le replay affiche les poses enregistrées, la cible du robot, l’action en cour
 
 - `contour_mm` contient les sommets du châssis, mesurés depuis son centre de rotation. Suis l’ordre du périmètre dans l’un ou l’autre sens. Le contour doit être convexe, sans sommets alignés, et tenir sur le tapis à la position de départ.
 - Chaque bloc `[[ventouses]]` définit une ventouse. `position_mm` donne sa position dans le même repère que le contour. `angle_deg` indique vers où elle pointe. L’axe X positif et l’angle 0° pointent vers l’avant. L’axe Y positif et l’angle 90° pointent vers le bas du tapis lorsque le robot est à son cap initial.
+- `construction` indique ce que la ventouse peut construire : `mur`, `tour` ou `porte`. Une ventouse `tour` peut aussi construire des murs ; une ventouse `porte` peut aussi construire des tours et des murs. La valeur par défaut est `mur`.
+- `planificateur` choisit l’algorithme de pathfinding associé (`astar` par défaut). Le bloc `[mouvement]` décrit la base, les vitesses, les accélérations et la masse.
 - Ajoute, déplace ou supprime des blocs pour changer l’équipement. Leur ordre donne les numéros. Les touches **1 à 9** pilotent les neuf premières ventouses et **0** pilote la dixième. Toutes sont cliquables. Par défaut, **1** et **4** sont à l’avant, à 100 mm de part et d’autre du milieu de la face. **2** et **3** sont sur les côtés, chacune sur une face.
 
 ## Architecture
 
-- `src/simulateur.py` contient le moteur de simulation, utilisable sans fenêtre.
-- `src/interface.py` contient l’interface Tkinter, le pilotage manuel et la lecture des replays.
-- `src/match.py` planifie et joue les matchs automatiques, puis enregistre les replays.
-- `src/reseau.py` entraîne et évalue le réseau.
-- `test/` contient les tests de simulation, de replay et d’entraînement.
-- `assets/` contient l’image du tapis.
+Le code est découpé en paquets interchangeables : `domaine`, `terrains`, `robots`, `regles`, `physique`, `planification`, `actions`, `strategies`, `deroulement`, `replay`, `infra`, `reseaux`, `selection`, `recompenses`, `evaluation`, `composition`, `cli` et `ui`. Les anciens modules `simulateur.py`, `match.py`, `reseau.py` et `interface.py` restent des façades de compatibilité.
+
+- `src/physique/moteur.py` contient le moteur Pymunk, utilisable sans fenêtre.
+- `src/planification/` contient les algorithmes de trajet ; `src/actions/` les prises, déposes et le retour.
+- `src/strategies/` et `src/deroulement/` jouent les matchs ; `src/replay/` les enregistre et les relit.
+- `src/reseaux/`, `src/selection/` et `src/recompenses/` contiennent le réseau, les sélecteurs et les récompenses.
+- `src/composition/` et `src/app.py` assemblent le tout depuis un profil.
+- `src/ui/` contient l’interface Tkinter, le pilotage manuel et la lecture des replays.
+- `test/` contient les tests historiques et les tests de modularisation.
 - `docs/` décrit l’architecture, la structure et le domaine pour les développeurs et les assistants LLM. Le plan de modularisation est dans [`docs/plan-modularisation.md`](docs/plan-modularisation.md).
 
 ## Vérifier

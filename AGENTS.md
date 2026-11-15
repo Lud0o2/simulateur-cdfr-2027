@@ -6,11 +6,12 @@
 
 ## Architecture
 
-- `src/simulateur.py` contient l’état du match et la physique Pymunk. Le pilotage manuel, les tests et le futur entraînement utilisent le même moteur. Le moteur doit pouvoir être importé et avancé sans fenêtre, sans chargement du tapis et sans attente en temps réel.
-- `src/interface.py` gère le rendu Tkinter, les commandes manuelles et la conversion des pixels en millimètres. Les règles du jeu et les collisions appartiennent au moteur.
-- `RobotRobotronik.toml` définit le contour et les ventouses du robot. Utiliser cette géométrie pour les collisions, les prises et l’affichage, et déduire les commandes de la liste des ventouses.
+- `src/physique/moteur.py` contient l’état du match et la physique Pymunk. `src/simulateur.py` est une façade de compatibilité. Le pilotage manuel, les tests et l’entraînement utilisent le même moteur, importable et avançable sans fenêtre, sans chargement du tapis et sans attente en temps réel.
+- `src/ui/` gère le rendu Tkinter et les commandes ; `src/interface.py` est une façade. Les règles du jeu et les collisions appartiennent au moteur.
+- `RobotRobotronik.toml` définit le contour, les ventouses, leur `construction` (`mur`, `tour`, `porte`), le `[mouvement]` et le `planificateur`. Utiliser cette géométrie pour les collisions, les prises et l’affichage, et déduire les commandes de la liste des ventouses. Une ventouse `tour` peut construire des murs ; une ventouse `porte` peut construire tours et murs.
+- `src/domaine/`, `src/terrains/`, `src/robots/`, `src/regles/`, `src/planification/`, `src/actions/`, `src/strategies/`, `src/deroulement/`, `src/replay/`, `src/reseaux/`, `src/selection/`, `src/recompenses/` et `src/composition/` contiennent les modules interchangeables. Les anciens `simulateur.py`, `match.py`, `reseau.py` et `interface.py` restent des façades.
 - `test/` contient les tests `unittest` et `assets/` les ressources d’affichage.
-- `docs/` décrit l’architecture et la structure pour les LLM. Mettre ces documents à jour avec le code. Le plan de modularisation est une proposition tant qu’il n’est pas implémenté.
+- `docs/` décrit l’architecture et la structure pour les LLM. Mettre ces documents à jour avec le code. Le plan de modularisation décrit l’état appliqué et les points restants.
 
 ## Simulation et vérification
 

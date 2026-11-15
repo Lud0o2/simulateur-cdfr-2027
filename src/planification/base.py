@@ -71,3 +71,13 @@ class Planificateur(Protocol):
     id: str
 
     def planifier(self, demande: DemandeTrajet) -> Trajet | None: ...
+
+
+def approach_depuis_trajet(trajet: Trajet) -> Approach:
+    return Approach(
+        trajet.duree_s,
+        tuple(Vec2d(*point) for point in trajet.avant),
+        trajet.rotation_rad,
+        tuple(Vec2d(*point) for point in trajet.apres),
+        trajet.en_roulant,
+    )

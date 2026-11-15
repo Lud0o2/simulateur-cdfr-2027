@@ -14,12 +14,28 @@ Le projet ne simule pas encore d'adversaire. Un seul robot évolue sur la table.
 
 | Chemin | Rôle |
 | --- | --- |
-| `src/simulateur.py` | État du match, physique Pymunk, collisions, prises, score de construction, retour. |
-| `src/match.py` | Planification de trajets, actions de prise/dépose, stratégie de référence, replay, CLI. |
-| `src/reseau.py` | Caractéristiques, réseau MLP, politique de sélection, entraînement, CLI. |
-| `src/interface.py` | Fenêtre Tkinter, pilotage manuel, rendu et lecture des replays. |
-| `test/test_simulateur.py` | Tests `unittest` du moteur, du match, du réseau, des replays et du TOML. |
-| `RobotRobotronik.toml` | Contour du robot et ventouses. |
+| `src/app.py` | CLI unifiée : `match`, `replay`, `ui`, `train`, `compare`. |
+| `src/composition/` | Profil, registre et composition par défaut. |
+| `src/domaine/` | Modèle pur, géométrie, robot, scénario, score. |
+| `src/terrains/` | Terrain officiel 2027. |
+| `src/robots/` | Chargement TOML et `RobotGeometry`. |
+| `src/regles/` | Barème, score 2027 et phases du match. |
+| `src/physique/` | Moteur Pymunk, piles, freinage, préhenseur. |
+| `src/planification/` | A*, planificateur direct, coût, rotation. |
+| `src/actions/` | Prise, dépose, approche, retour, capacités. |
+| `src/strategies/` | Stratégie de référence, lots, poses. |
+| `src/deroulement/` | Déroulé du match. |
+| `src/replay/` | Format, lecture, sauvegarde, lecteur. |
+| `src/infra/` | Ressources, horloge, aléa, reporting, notification. |
+| `src/reseaux/` | Caractéristiques, MLP, mutation, stockage. |
+| `src/selection/` | Glouton, aléatoire, epsilon, politique réseau. |
+| `src/recompenses/` | Variantes de récompense. |
+| `src/evaluation/` | Scénarios, métriques, benchmark. |
+| `src/ui/` | Thème, assets, rendu, clavier, fenêtre Tkinter. |
+| `src/simulateur.py`, `src/match.py`, `src/reseau.py`, `src/interface.py` | Façades de compatibilité. |
+| `test/test_simulateur.py` | Tests historiques. |
+| `test/test_modularisation.py` | Tests des capacités, contrats et isolations. |
+| `RobotRobotronik.toml` | Contour, ventouses, capacités, mouvement et planificateur. |
 | `assets/tapis_2027.png` | Image du tapis pour l'interface et les replays. |
 | `AGENTS.md` | Règles de travail du dépôt. |
 | `README.md` | Documentation utilisateur et feuille de route. |
@@ -27,7 +43,7 @@ Le projet ne simule pas encore d'adversaire. Un seul robot évolue sur la table.
 
 ## Invariants à respecter
 
-1. **Le moteur reste utilisable sans fenêtre.** `src/simulateur.py` ne doit jamais importer `tkinter`, `PIL`, `src.interface` ni charger l'image du tapis.
+1. **Le moteur reste utilisable sans fenêtre.** `src/physique/moteur.py` ne doit jamais importer `tkinter`, `PIL`, `src.ui` ni charger l'image du tapis.
 2. **Le moteur n'attend pas le temps réel.** `Simulation.advance(seconds)` avance la physique à pas fixe (`PHYSICS_STEP = 1/480`). Un match de 100 s simulées doit pouvoir se jouer en quelques secondes.
 3. **`reset()` rétablit l'état initial complet** : temps, robot, cap, ventouses, piles, mouvement, pivot, accumulateur de pas.
 4. **Unités** : millimètres, secondes, radians dans le moteur. Les degrés restent dans le TOML et l'affichage.
@@ -83,13 +99,17 @@ python -B -m unittest discover -s test -v
 
 | Besoin | Fichier principal | Vérifications |
 | --- | --- | --- |
-| Changer la forme ou les ventouses | `RobotRobotronik.toml` | `RobotConfigurationTest`, puis `python -B -m src.interface`. |
-| Changer la physique ou les collisions | `src/simulateur.py` | `SimulationTest`, puis match de référence. |
-| Changer la planification ou les actions | `src/match.py` | `AutomaticMatchTest`. |
-| Changer le réseau ou l'entraînement | `src/reseau.py` | `TrainingReplayTest`. |
-| Changer l'affichage ou les commandes | `src/interface.py` | Lancer l'interface, charger le tapis, tester les touches touchées. |
-| Changer le terrain ou le score | `src/simulateur.py` + `docs/domaine-et-regles.md` | Citer le règlement, mettre à jour les tests de score. |
-| Changer le format de replay | `src/match.py` (`_frame`, `Replay`, `save_replay`) | Tests de replay et ouverture dans l'interface. |
+| Changer la forme, les ventouses ou les capacités | `RobotRobotronik.toml` + `src/robots/loader.py` | `RobotConfigurationTest`, `TomlTest`, puis `python -B -m src.interface`. |
+| Changer la physique ou les collisions | `src/physique/` | `SimulationTest`, puis match de référence. |
+| Changer la planification | `src/planification/` | `AutomaticMatchTest`, `PlanningTest`. |
+| Changer une action | `src/actions/` | `AutomaticMatchTest`. |
+| Changer la stratégie ou les poses | `src/strategies/` | `AutomaticMatchTest`, `TrainingReplayTest`. |
+| Changer la récompense ou la sélection | `src/recompenses/`, `src/selection/` | `RewardSelectionTest`, `TrainingReplayTest`. |
+| Changer le réseau ou l'entraînement | `src/reseaux/`, `src/reseau.py` | `TrainingReplayTest`. |
+| Changer l'affichage ou les commandes | `src/ui/` | Lancer l'interface, charger le tapis, tester les touches touchées. |
+| Changer le terrain ou le score | `src/terrains/`, `src/regles/` | Citer le règlement, `SimulationTest` et `TomlTest`. |
+| Changer le format de replay | `src/replay/` | Tests de replay et ouverture dans l'interface. |
+| Changer la composition | `src/composition/` | `CompositionTest`. |
 
 ## Commandes de validation
 
@@ -99,6 +119,11 @@ python -B -m unittest discover -s test -v
 
 # Match de référence sans fenêtre
 python -B -m src.match
+
+# Application unifiée
+python -B -m src.app match
+python -B -m src.app replay
+python -B -m src.app ui
 
 # Comparaison réseau / référence
 python -B -m src.reseau compare

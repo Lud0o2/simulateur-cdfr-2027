@@ -9,7 +9,7 @@ from .approche import _pickup_approach
 from .execution import _action_state, _follow, _stroke_end
 
 
-def take_pile(simulation: Simulation, pile: int, cup: int, *, advance=None, deadline=None) -> bool:
+def take_pile(simulation: Simulation, pile: int, cup: int, *, advance=None, deadline=None, planner=None) -> bool:
     """Rejoint un grand côté de la pile désignée et la saisit avec la ventouse choisie."""
     blocks = simulation.blocks
     if (simulation.moving or type(pile) is not int or not 0 <= pile < len(blocks)
@@ -17,7 +17,7 @@ def take_pile(simulation: Simulation, pile: int, cup: int, *, advance=None, dead
             or simulation.held_pile(cup) is not None
             or any(simulation.held_pile(number) == pile for number in range(1, len(simulation.geometry.mounts) + 1))):
         return False
-    pickup = _pickup_approach(simulation, blocks[pile], cup, _action_state(simulation))
+    pickup = _pickup_approach(simulation, blocks[pile], cup, _action_state(simulation), planner=planner)
     return pickup is not None and _take_pickup(simulation, pile, cup, pickup, advance=advance, deadline=deadline)
 
 

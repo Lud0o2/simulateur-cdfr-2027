@@ -8,27 +8,63 @@ simulateur-cdfr-2027/
 ├── README.md
 ├── RobotRobotronik.toml
 ├── requirements.txt
-├── assets/
-│   └── tapis_2027.png
+├── app.py                      # via python -m src.app
+├── assets/tapis_2027.png
 ├── docs/
-│   ├── README.md
-│   ├── contexte-llm.md
-│   ├── architecture.md
-│   ├── structure.md
-│   ├── domaine-et-regles.md
-│   └── plan-modularisation.md
-├── replays/                  (ignoré par git)
-├── reseau.npz                (ignoré par git)
+├── replays/                    (ignoré par git)
+├── reseau.npz                  (ignoré par git)
 ├── src/
-│   ├── simulateur.py
-│   ├── match.py
-│   ├── reseau.py
-│   └── interface.py
+│   ├── app.py                  # CLI unifiée
+│   ├── composition/            # profil, registre, composition par défaut
+│   ├── domaine/                # modèle, géométrie, robot, scénario, score
+│   ├── terrains/               # terrain officiel 2027
+│   ├── robots/                 # chargement TOML et RobotGeometry
+│   ├── regles/                 # barème, score, phases
+│   ├── physique/               # moteur Pymunk, piles, freinage, préhenseur
+│   ├── planification/          # A*, direct, coût, rotation
+│   ├── actions/                # prise, dépose, approche, retour
+│   ├── strategies/             # référence, lots, poses
+│   ├── deroulement/            # runner, phases, enregistrement
+│   ├── replay/                 # format, lecture, sauvegarde, lecteur
+│   ├── infra/                  # ressources, horloge, aléa, reporting
+│   ├── reseaux/                # caractéristiques, MLP, mutation, stockage
+│   ├── selection/              # glouton, aléatoire, epsilon, réseau
+│   ├── recompenses/            # variantes de récompense
+│   ├── evaluation/             # scénarios, métriques, benchmark
+│   ├── cli/                    # points d'entrée CLI
+│   ├── ui/                     # thème, assets, rendu, clavier, fenêtre
+│   ├── simulateur.py           # façade de compatibilité
+│   ├── match.py                # façade de compatibilité
+│   ├── reseau.py               # façade de compatibilité + entraînement
+│   └── interface.py            # façade de compatibilité
 └── test/
-    └── test_simulateur.py
+    ├── test_simulateur.py
+    └── test_modularisation.py
 ```
 
-Il n'y a ni `pyproject.toml`, ni `setup.py`, ni `src/__init__.py`. `src` fonctionne comme un paquet-espace de noms, ce qui suffit pour `python -m src.match` et pour `import src.match` depuis la racine.
+`src` reste un paquet-espace de noms, sans `src/__init__.py`. Les sous-paquets
+ont des `__init__.py`. Les commandes historiques `python -m src.match`,
+`python -m src.reseau` et `python -m src.interface` fonctionnent toujours.
+
+| Paquet | Point d'entrée principal |
+| --- | --- |
+| `domaine` | `RobotSpec`, `Block`, `Observation`, `ScenarioSpec`, `construction_score`. |
+| `robots` | `load_robot`, `load_robot_spec`, `RobotGeometry`. |
+| `physique` | `Simulation`, `creer_pile`, `capturer`, `relacher`. |
+| `planification` | `AstarPlanner`, `DirectPlanner`, `Approach`. |
+| `actions` | `take_pile`, `place_pile`, `_return_home`, `construction_retenue`. |
+| `strategies` | `choose_plan`, `_play_batches`, `DROP_SITES`. |
+| `deroulement` | `play_match`. |
+| `replay` | `Replay`, `save_replay`, `LecteurReplay`. |
+| `reseaux` | `Network`, `features`, `EncodeurCaracteristiques`. |
+| `selection` | `Glouton`, `Aleatoire`, `MatchPolicy`. |
+| `recompenses` | `ConstructionTemps`, `Retour`, `Depots`. |
+| `evaluation` | `officiel_2027`, `_replay_rank`. |
+| `composition` | `composer`, `Profil`, `FABRIQUES`. |
+
+Les sections suivantes décrivent les symboles historiques réexportés par les
+façades ; ils restent valables pour comprendre le comportement, mais le code
+source est désormais dans les paquets ci-dessus.
 
 ## `src/simulateur.py`
 

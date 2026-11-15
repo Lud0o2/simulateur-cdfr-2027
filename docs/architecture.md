@@ -2,45 +2,60 @@
 
 ## Vue d'ensemble
 
-Le projet est organisé en quatre modules exécutables et un module de tests. Il n'y a pas de couche d'abstraction entre eux : `match.py` et `reseau.py` importent directement des fonctions et des symboles privés de `simulateur.py` et de `match.py`.
+Le code est désormais réparti en paquets spécialisés. Les anciens modules
+`simulateur.py`, `match.py`, `reseau.py` et `interface.py` restent des façades
+de compatibilité pour les tests et les commandes existantes.
 
 ```text
-                 +----------------------+
-                 |   src/interface.py   |
-                 |  Tkinter + replays   |
-                 +----------+-----------+
-                            |
-                            v
-                 +----------------------+
-                 |  src/simulateur.py   |
-                 |  moteur Pymunk       |
-                 |  état du match       |
-                 +----------+-----------+
-                            ^
-                            |
-          +-----------------+------------------+
-          |                                    |
-+---------+----------+              +----------+---------+
-|    src/match.py    |              |   src/reseau.py    |
-| planification      |<-------------| features, MLP      |
-| actions, stratégie |  symboles    | politique, entraîn.|
-| replay, CLI        |  privés      | CLI                |
-+--------------------+              +--------------------+
+app.py / cli
+  -> composition (config, registre, défaut)
+       -> robots + terrains + regles
+       -> physique
+       -> planification
+       -> actions
+       -> strategies
+       -> recompenses + selection + reseaux
+       -> deroulement + replay
+       -> ui
 ```
 
-Dépendances réelles, dans l'ordre des imports :
-
-| Module | Importe | Remarque |
+| Paquet | Rôle | Dépend de |
 | --- | --- | --- |
-| `src/simulateur.py` | `pymunk`, bibliothèque standard | Aucun import du projet. |
-| `src/match.py` | `src.simulateur` | Importe des helpers privés (`_finite_number`, `_polygon_bounds`). |
-| `src/reseau.py` | `src.match`, `src.simulateur` | Importe des helpers privés de `match` (`_action_state`, `_pickup_approach`, `_drop_target`, `_rotated_footprint`, `_visibility`, `_wall_drop_zones`). |
-| `src/interface.py` | `src.simulateur` | Importe `tkinter` et `PIL` à l'intérieur de `create_window`, pas au niveau module. |
-| `test/test_simulateur.py` | les quatre modules | Importe de nombreux symboles privés. |
+| `domaine` | Modèle, géométrie pure, robot, scénario, score. | Bibliothèque standard. |
+| `terrains` | Données du terrain officiel 2027. | `domaine`. |
+| `robots` | Chargement TOML et vue `RobotGeometry`. | `domaine`, `terrains`, Pymunk. |
+| `regles` | Barème, score 2027, phases du match. | `domaine`, `terrains`. |
+| `physique` | Moteur Pymunk, piles, freinage, préhenseur, collisions. | `domaine`, `regles`, `robots`, `terrains`. |
+| `planification` | A*, planificateur direct, coût, rotation. | `domaine`, `physique`, `terrains`. |
+| `actions` | Prise, dépose, approche, retour, capacités. | `planification`, `domaine`. |
+| `strategies` | Référence, lots, catalogue de poses. | `actions`, `planification`. |
+| `deroulement` | Déroulé du match et enregistrement. | `strategies`, `actions`, `replay`. |
+| `replay` | Format, lecture, sauvegarde, lecteur. | `domaine`, `infra`. |
+| `infra` | Ressources, horloge, aléa, reporting, notification. | Bibliothèque standard. |
+| `reseaux` | Caractéristiques, MLP, mutation, stockage, entraînement. | `domaine`, `strategies`, `actions`, NumPy. |
+| `selection` | Glouton, aléatoire, epsilon, politique réseau. | `reseaux`, `strategies`. |
+| `recompenses` | Variantes de récompense. | `domaine`, `regles`. |
+| `evaluation` | Scénarios, métriques, benchmark. | `deroulement`. |
+| `composition` | Profil, registre et assemblage par défaut. | Tous les adaptateurs. |
+| `ui` | Thème, assets, rendu, clavier, fenêtre Tkinter. | `physique`, `simulateur`. |
 
-Cette organisation est fonctionnelle mais rigide : le moteur contient la géométrie du robot et le terrain officiel, `match.py` contient la planification et les actions, `reseau.py` contient à la fois les caractéristiques, le réseau, la politique et l'entraînement.
+Les dépendances autorisées vont du domaine vers l'application, jamais
+l'inverse. Un test d'isolation vérifie que `domaine` n'importe ni Pymunk, ni
+NumPy, ni Tkinter, et que le moteur n'importe pas le chargeur de robot ni
+l'interface au niveau module.
+
+### Façades de compatibilité
+
+| Ancien module | Contenu actuel |
+| --- | --- |
+| `src/simulateur.py` | Réexporte le domaine, le terrain, le robot, les règles et `Simulation`. |
+| `src/match.py` | Réexporte la planification, les actions, les stratégies, le déroulement et les replays. |
+| `src/reseau.py` | Réexporte les caractéristiques, le réseau, la politique, la mutation et les métriques ; garde la boucle d'entraînement. |
+| `src/interface.py` | Réexporte `create_window` depuis `ui/window.py`. |
 
 ## Flux d'exécution
+
+Les noms de fonctions historiques (`play_match`, `choose_plan`, `_route`, etc.) restent ceux des façades. Les flux décrivent donc le comportement observable, pas l'emplacement actuel de chaque symbole.
 
 ### 1. Pilotage manuel
 
@@ -212,19 +227,17 @@ Simulation
 
 Le détail des 97 entrées est dans [`domaine-et-regles.md`](domaine-et-regles.md#encodage-du-réseau).
 
-## Points de couplage actuels
+## Points de couplage restants
 
 | Couplage | Conséquence |
 | --- | --- |
-| `simulateur.py` charge `RobotRobotronik.toml` et contient `START`, `START_BLOCKS`, `WALL_ZONES`, `TOWER_CENTERS`, `THRONE_ROOM`. | Le moteur n'est pas indépendant du robot ni du terrain. |
-| `Simulation` expose `move_to`, `turn_by`, `toggle_suction` avec des constantes de cinématique. | Un autre type de base (différentiel) ne peut pas être branché sans modifier le moteur. |
-| `match.py` contient le routeur A*, les actions et la stratégie. | Changer d'algorithme de pathfinding impose de modifier `match.py`. |
-| `reseau.py` importe des fonctions privées de `match.py`. | La frontière entre planification, politique et apprentissage est poreuse. |
-| `MatchPolicy` lit `network.drop_offsets` et `network.drop_angles` par `getattr`. | Le réseau et la politique ne partagent pas un contrat explicite. |
-| `features()` code en dur 97 entrées et 10 piles. | Changer de réseau ou de représentation impose de réécrire l'encodage. |
-| Le score de construction est codé dans `simulateur.py` et réutilisé par `match.py` et `reseau.py`. | Une variante de récompense ne peut pas être branchée sans toucher au moteur. |
-| Les actions ne connaissent pas les types de construction. | Un robot avec des ventouses « tour » ou « porte » ne peut pas exprimer ses capacités. |
-| Un seul robot est représenté. | Les duels de l'étape 8 du README ne sont pas préparés. |
+| `Simulation` utilise encore le terrain et le score officiels par défaut. | Un terrain alternatif doit fournir `TerrainSpec` et les fonctions de score associées. |
+| `simulateur.py` et `match.py` restent des façades très larges. | Les nouveaux modules doivent importer les paquets directs, pas les façades. |
+| `reseau.py` garde la boucle d'entraînement et ses dépendances. | La façade `reseaux/entrainement.py` existe, mais la boucle n'est pas encore complètement déplacée. |
+| `ui/window.py` garde les contrôleurs Tkinter imbriqués. | `ui/canvas_renderer.py` et `ui/manual_controller.py` sont utilisés, mais `replay_controller.py` n'est pas encore branché dans la fenêtre. |
+| Les actions sont encore des fonctions, pas des classes `Action`. | Les capacités de construction sont vérifiées par `actions/construction.py`, mais `Composition.actions` est vide. |
+| Un seul robot est simulé. | Les duels et les adversaires ne sont pas encore branchés. |
+| Les tours et les portes ne sont pas des actions de construction. | Le TOML peut déclarer la capacité, mais le score et la construction correspondants restent à faire. |
 
 ## Règles de dépendance recommandées
 

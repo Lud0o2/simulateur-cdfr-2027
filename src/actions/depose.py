@@ -23,7 +23,7 @@ def _drop_retreat(simulation, cup, *, advance=None, deadline=None):
 
 
 def place_pile(simulation: Simulation, cup: int, x: float, y: float, angle: float, *, advance=None,
-               deadline=None, on_release=None) -> bool:
+               deadline=None, on_release=None, planner=None) -> bool:
     """Dépose la pile à la pose demandée, puis recule si l'espace le permet."""
     if (simulation.moving or type(cup) is not int or not 1 <= cup <= len(simulation.geometry.mounts)
             or not all(_finite_number(value) for value in (x, y, angle))
@@ -35,7 +35,7 @@ def place_pile(simulation: Simulation, cup: int, x: float, y: float, angle: floa
     block = simulation.blocks[index]
     destination = Vec2d(x, y)
     target_angle = remainder(angle, 2 * pi)
-    approach = _drop_approach(block, destination, angle, _action_state(simulation))
+    approach = _drop_approach(block, destination, angle, _action_state(simulation), planner=planner)
     if approach is None or not _follow(simulation, approach, advance=advance, deadline=deadline):
         return False
     placed = simulation.blocks[index]

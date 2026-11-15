@@ -1,6 +1,12 @@
 # Plan de modularisation
 
-> **Statut : proposition.** Ce document décrit une cible et des étapes. Il ne décrit pas encore le code du dépôt. Les chemins proposés n'existent pas tant que la migration n'est pas réalisée.
+> **Statut : appliqué par étapes sur `codex/etape-9`.** Les paquets `domaine`,
+> `terrains`, `robots`, `regles`, `physique`, `planification`, `actions`,
+> `strategies`, `deroulement`, `replay`, `infra`, `reseaux`, `selection`,
+> `recompenses`, `evaluation`, `composition` et `ui` existent. Les anciens
+> modules `simulateur.py`, `match.py`, `reseau.py` et `interface.py` sont des
+> façades de compatibilité. Les points non terminés sont listés en fin de
+> document.
 
 ## 1. Objectif
 
@@ -1079,3 +1085,33 @@ La modularisation est considérée terminée lorsque :
 - les tests de permutation, de capacité et d'isolation passent ;
 - les anciennes commandes et les anciens modèles/replays fonctionnent ;
 - `docs/` reflète l'architecture réelle.
+
+## 14. État d'implémentation
+
+Implémenté :
+
+- domaine pur : géométrie, modèle, robot, scénario, score ;
+- terrain officiel et barème 2027 ;
+- chargement TOML avec `construction`, `[mouvement]` et `planificateur` ;
+- moteur physique Pymunk découplé par `RobotGeometry`, `TerrainSpec` et les modules de pile, freinage et préhenseur ;
+- planification A* et planificateur direct ;
+- actions de prise, dépose, approche, retour et capacités de construction ;
+- stratégies de référence et par lots ;
+- déroulement du match et enregistrement des replays ;
+- replay : format, lecture, sauvegarde, index et lecteur sans Tkinter ;
+- infrastructure : ressources, horloge, aléa, reporting, notification ;
+- réseaux : caractéristiques, MLP, mutation, mémoire, optimiseur, stockage ;
+- sélection : glouton, aléatoire, epsilon, politique réseau ;
+- récompenses : construction, construction + temps, retour, déposes, sparse ;
+- évaluation : scénarios, métriques, benchmark ;
+- composition, registre, application unifiée et CLI ;
+- interface découpée en thème, assets, rendu d'état, clavier et fenêtre.
+
+Reste à faire :
+
+- déplacer complètement la boucle d'entraînement de `reseau.py` vers `reseaux/entrainement.py` avec injection des dépendances ; la façade existe déjà ;
+- extraire les contrôleurs Tkinter complets (`manual_controller`, `replay_controller`) de `ui/window.py` ; les briques existent, la fenêtre les utilise partiellement ;
+- transformer les actions en classes `Action` complètes et les brancher dans `Composition.actions` ;
+- implémenter les constructions `tour` et `porte` comme actions et citer les points du règlement ;
+- ajouter les tests de permutation complets prévus en section 10 ;
+- préparer plusieurs robots et les duels.

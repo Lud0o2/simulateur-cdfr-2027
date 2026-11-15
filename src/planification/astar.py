@@ -239,3 +239,19 @@ def _approach(start, end, angle, footprints, obstacles) -> Approach | None:
     return best
 
 
+
+
+class AstarPlanner:
+    id = "astar"
+
+    def planifier(self, demande):
+        obstacles = tuple((obstacle, _bounds(obstacle)) for obstacle in demande.obstacles)
+        approach = _approach(
+            Vec2d(*demande.depart), Vec2d(*demande.arrivee), demande.angle_vise,
+            demande.empreintes, obstacles,
+        )
+        if approach is None:
+            return None
+        from .base import Trajet
+
+        return Trajet(approach.duration, approach.before, approach.turn, approach.after, approach.rolling)

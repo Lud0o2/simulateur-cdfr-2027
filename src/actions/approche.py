@@ -9,14 +9,27 @@ from ..domaine.constantes import CONTACT_GAP
 from ..domaine.geometrie import travel_time
 from ..domaine.modele import Block
 from ..planification.astar import _approach, _clear
-from ..planification.base import Pickup
+from ..planification.base import DemandeTrajet, Pickup, approach_depuis_trajet
 from ..regles.score_2027 import scoring_zones
 from ..terrains.officiel_2027 import TOWER_CENTERS, TOWER_RADIUS
 from .execution import _stroke_end
 from .params import PICKUP_GAP, PICKUP_STANDOFF, PICKUP_STROKE
 
 
-def _pickup_approach(simulation, block, cup, state):
+def _planifier(planner, start, end, angle, footprints, obstacles):
+    if planner is None:
+        return _approach(start, end, angle, footprints, obstacles)
+    demande = DemandeTrajet(
+        tuple(start), tuple(end),
+        tuple(tuple(tuple(point) for point in footprint) for footprint in footprints),
+        tuple(obstacle for obstacle, _ in obstacles),
+        angle_vise=angle,
+    )
+    trajet = planner.planifier(demande)
+    return None if trajet is None else approach_depuis_trajet(trajet)
+
+
+def _pickup_approach(simulation, block, cup, state, planner=None):
     mount, facing = simulation.geometry.mounts[cup - 1]
     start, footprints, obstacles = state
     center = Vec2d(*block.position)
@@ -45,7 +58,7 @@ def _pickup_approach(simulation, block, cup, state):
         rotated = tuple(tuple(Vec2d(*corner).rotated(angle) for corner in shape) for shape in footprints)
         if not _clear(standoff, contact, rotated, obstacles):
             continue
-        approach = _approach(start, standoff, angle, footprints, obstacles)
+        approach = _planifier(planner, start, standoff, angle, footprints, obstacles)
         if approach is not None:
             approach = replace(approach, duration=approach.duration + travel_time(standoff.get_distance(contact)),
                                after=(*approach.after, contact))
@@ -70,13 +83,13 @@ def _drop_target(block, destination, angle, start):
     return destination - (center - start).rotated(turn), turn
 
 
-def _drop_approach(block, destination, angle, state):
+def _drop_approach(block, destination, angle, state, planner=None):
     start, footprints, obstacles = state
     end, turn = _drop_target(block, destination, angle, start)
     center = Vec2d(*block.position)
     corners = tuple(tuple(destination + (Vec2d(*corner) - center).rotated(turn)) for corner in block.corners)
     if not _wall_drop_zones(Block(tuple(destination), block.angle + turn, corners))[1]:
         return None
-    return _approach(start, end, turn, footprints, obstacles)
+    return _planifier(planner, start, end, turn, footprints, obstacles)
 
 
