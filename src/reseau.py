@@ -338,8 +338,8 @@ class MatchPolicy:
 
 def _match_rank(score, duration):
     """Classe un match par points par seconde, puis par total de points."""
-    # Une durée nulle donnerait une cadence infinie : le plancher la garde en tête.
-    return score / max(duration, 1e-6), score
+    # Un match sans temps simulé ne peut pas obtenir une cadence infinie.
+    return (score / duration if duration > 0 else 0.0), score
 
 
 def _replay_rank(replay):

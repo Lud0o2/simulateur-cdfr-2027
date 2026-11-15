@@ -467,19 +467,24 @@ class TrainingReplayTest(unittest.TestCase):
         self.assertEqual(_replay_rank(many)[0], _replay_rank(few)[0])
         # Une cadence plus élevée l'emporte sur un plus gros total.
         self.assertGreater(_replay_rank(longer), _replay_rank(many))
+        # Un match sans temps simulé ne peut pas obtenir une cadence infinie.
+        self.assertEqual(_replay_rank({"score": 10, "duree": 0}), (0.0, 10))
 
-    def test_network_can_finish_even_with_a_pickup_available(self):
+    def test_match_cannot_end_before_the_first_pickup(self):
         class FinishFirst:
             def predict(self, rows):
                 return np.where(rows[:, 79] == -1, 1, 0)
 
-        simulation = two_pile_simulation()
-        result = play_match(simulation, policy=MatchPolicy(FinishFirst()))
-        self.assertEqual(result["duree"], 0)
-        self.assertEqual(result["score"], 10)
-        replay = Replay(result)
-        self.assertEqual(replay.duration, 0)
-        self.assertEqual(replay.frame["score"], 10)
+        result = play_match(two_pile_simulation(), policy=MatchPolicy(FinishFirst()))
+        # Le retour immédiat à 10 points en 0 s est interdit : une prise passe d'abord.
+        self.assertGreater(result["duree"], 0)
+        self.assertTrue(result["frames"][1]["action"].startswith("Prise pile"))
+        self.assertEqual(result["score_retour"], 10)
+        self.assertGreater(result["score"], 10)
+
+    def test_match_that_stays_in_the_room_scores_nothing(self):
+        result = play_match(Simulation(blocks=()), policy=MatchPolicy(Network(np.random.default_rng(7))))
+        self.assertEqual((result["score"], result["score_retour"], result["duree"]), (0, 0, 0))
 
     def test_network_can_switch_to_deposits_with_one_pile_loaded(self):
         class StopAfterOne:

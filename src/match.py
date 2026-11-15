@@ -665,6 +665,7 @@ def _play_batches(simulation, record, policy, drop_poses):
         return action(simulation, **choice, advance=advance, deadline=BUILD_DEADLINE)
 
     cups = range(1, len(simulation.geometry.mounts) + 1)
+    picked = False
     shape_tables = {}
     while simulation.time < BUILD_DEADLINE:
         held = {}
@@ -690,7 +691,9 @@ def _play_batches(simulation, record, policy, drop_poses):
                 break
             choices.sort()
             if policy is not None:
-                choices = policy.order(simulation, held, choices, pickup=True, can_finish=True, pickup_plans=approaches)
+                # Un match ne peut pas se terminer avant la première prise réussie.
+                choices = policy.order(simulation, held, choices, pickup=True, can_finish=picked,
+                                       pickup_plans=approaches)
                 choice = choices[0]
             else:
                 # À un pas de simulation du match près, privilégier le plus petit changement de cap.
@@ -709,6 +712,7 @@ def _play_batches(simulation, record, policy, drop_poses):
                            pile=index, cup=cup, pickup=approaches[index, cup]):
                 missed.add((index, cup))
                 continue
+            picked = True
             if policy is not None:
                 policy.observe(choice)
             held[cup] = index
@@ -850,7 +854,8 @@ def play_match(simulation: Simulation, *, batches=False, policy=None, record_fra
         _play_reference(simulation, record)
 
     _return_home(simulation, record)
-    bonus = simulation.return_score
+    # Un match qui n'a consommé aucun temps simulé est resté sur place : pas de bonus.
+    bonus = simulation.return_score if simulation.time > 0 else 0
     record(f"Fin du match · Retour +{bonus}" if bonus else "Fin du match", bonus)
     replay = {"obstacles": simulation.obstacles, "frames": frames,
               "score": simulation.score + bonus, "score_retour": bonus, "duree": round(simulation.time, 6)}
