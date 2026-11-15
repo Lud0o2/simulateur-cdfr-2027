@@ -833,6 +833,8 @@ def _paired_cups(geometry):
 
 
 def _collection_actions(simulation, cups, held, paired, pair):
+    if 1 not in held or 4 not in held:
+        cups = tuple(cup for cup in cups if cup not in (5, 6))
     choices = _collection_choices(simulation, cups, held, nearest=3)
     if pair is not None:
         pile, cup, heading = pair

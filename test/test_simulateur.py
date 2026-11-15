@@ -994,6 +994,20 @@ class AutomaticMatchTest(unittest.TestCase):
         self.assertEqual({choice[2] for choice in choices}, set(nearest[1:4]))
         self.assertEqual({choice[3] for choice in choices}, {2})
 
+    def test_collection_requires_both_front_cups_before_the_rear_pair(self):
+        simulation = Simulation(blocks=START_BLOCKS[:4])
+        end = Vec2d(*simulation.position)
+        pickup = Pickup(Approach(0, (end,), pi / 2 - simulation.heading, ()), end)
+        paired = _paired_cups(simulation.geometry)
+        cups = range(1, 7)
+        with patch("src.match._pickup_options", return_value=(pickup,)):
+            for held, rear in (({}, set()), ({1: 0}, set()), ({4: 1}, set()), ({1: 0, 4: 1}, {5, 6})):
+                with self.subTest(held=held):
+                    actions = _collection_actions(simulation, cups, held, paired, None)
+                    available = {choice[3] for choice, _ in actions}
+                    self.assertEqual(available & {5, 6}, rear)
+                    self.assertTrue({2, 3} <= available)
+
     def test_collection_pairs_respect_both_pickup_orders_and_their_sides(self):
         simulation = Simulation(blocks=START_BLOCKS[:2])
         end = Vec2d(*simulation.position)

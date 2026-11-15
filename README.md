@@ -59,6 +59,8 @@ python -B -m src.match replay
 
 À chaque prise, le réseau choisit parmi les trois piles libres dont les centres sont les plus proches à vol d’oiseau. La planification vérifie ensuite les trajets de prise. À l’avant comme à l’arrière, les deux ventouses d’une paire prennent deux piles voisines sur la même rangée. La ventouse gauche prend celle du côté gauche du châssis et la droite celle du côté droit. Les deux prises se suivent, dans l’ordre choisi par le réseau. Les ventouses latérales peuvent prendre une pile chacune. Le retour se fait à pleine charge ou avec toutes les piles restantes.
 
+À chaque tournée, le réseau peut utiliser les ventouses arrière **5 et 6** dès que les deux ventouses avant **1 et 4** tiennent chacune une pile.
+
 Le réseau **11 → 8 → 1** classe les prises par trajet A*, durée, rotation, proximité du départ et d’une autre pile, ventouse, chargement, stock restant, temps restant et engagement d’une paire. L’entraînement conserve les deux meilleurs réseaux et teste de nouveaux réseaux aléatoires et des mutations. Il maximise le nombre de piles ramenées, puis minimise le temps jusqu’à la dernière décharge. Le fichier local `reseau-collecte.npz` contient les meilleurs poids. Ajoute `--resume` pour repartir de ces poids.
 
 Chaque lancement de l’entraînement de collecte tire une graine aléatoire et l’affiche. Ajoute `--seed` suivi d’un entier pour retrouver les mêmes tirages. Le replay enregistre la graine de la session.
