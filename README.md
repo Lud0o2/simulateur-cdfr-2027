@@ -64,7 +64,7 @@ python -B -m src.interface
 
 Le pilotage manuel et les replays s’ouvrent en plein écran. Le tapis garde ses proportions et s’agrandit dans l’espace disponible entre les informations et les commandes. Appuie sur **Échap** pour revenir en mode fenêtré ou sur **F11** pour basculer entre les deux modes.
 
-- Clique sur le tapis pour fixer la destination du centre du robot. Les flèches permettent un déplacement de 100 mm.
+- Clique sur le tapis pour fixer la destination du centre du robot. Les flèches commandent un déplacement de 100 mm. Maintiens deux flèches perpendiculaires pour avancer en diagonale.
 - Le robot avance en ligne droite vers la destination. La flèche sur le châssis indique l’avant. « Trajet bloqué » s’affiche quand le déplacement s’arrête à un obstacle.
 - Appuie sur **Q** pour tourner à gauche ou sur **D** pour tourner à droite, par pas de **15°**, à l’arrêt ou en roulant. Le robot garde sa destination et vérifie l’encombrement pendant la rotation, piles tenues comprises. En pivotant sur place, il peut écarter une pile libre. « Rotation bloquée » s’affiche si le pivot sur place est bloqué ou si le robot atteint sa destination sans pouvoir finir de tourner.
 - En gardant Q, D ou une flèche enfoncée, la commande se répète après **120 ms**, puis toutes les **60 ms**.

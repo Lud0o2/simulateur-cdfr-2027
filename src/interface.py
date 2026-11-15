@@ -1,4 +1,4 @@
-from math import cos, degrees, sin
+from math import cos, degrees, hypot, sin
 from pathlib import Path
 from time import perf_counter
 
@@ -279,11 +279,34 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         if 0 <= x <= TABLE_WIDTH and 0 <= y <= TABLE_HEIGHT:
             simulation.move_to(x, y)
 
-    def nudge(dx, dy):
-        x, y = simulation.position
-        simulation.move_to(x + dx, y + dy)
-
     held_keys: dict[int, str | None] = {}
+    directions: dict[int, tuple[int, int]] = {}
+    direction_timer = None
+
+    def cancel_direction_repeat():
+        nonlocal direction_timer
+        if direction_timer is not None:
+            root.after_cancel(direction_timer)
+            direction_timer = None
+
+    def nudge(delay=60):
+        nonlocal direction_timer
+        dx = sum(dx for dx, _ in directions.values())
+        dy = sum(dy for _, dy in directions.values())
+        distance = hypot(dx, dy)
+        x, y = simulation.position
+        if distance:
+            simulation.move_to(x + 100 * dx / distance, y + 100 * dy / distance)
+            direction_timer = root.after(delay, nudge)
+        else:
+            simulation.move_to(x, y)
+
+    def press_direction(event, dx, dy):
+        if event.keycode in directions:
+            return
+        directions[event.keycode] = (dx, dy)
+        cancel_direction_repeat()
+        nudge(120 if len(directions) == 1 else 60)
 
     def press(event, action, *, repeats=True):
         keycode = event.keycode
@@ -298,11 +321,18 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         held_keys[keycode] = root.after(120, repeat) if repeats else None
 
     def release(event):
+        if directions.pop(event.keycode, None) is not None:
+            cancel_direction_repeat()
+            if directions:
+                nudge()
+            return
         timer = held_keys.pop(event.keycode, None)
         if timer is not None:
             root.after_cancel(timer)
 
     def release_all(event=None):
+        cancel_direction_repeat()
+        directions.clear()
         for timer in held_keys.values():
             if timer is not None:
                 root.after_cancel(timer)
@@ -321,8 +351,8 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     canvas.bind("<Button-1>", click)
     root.bind("<KeyRelease>", release)
     root.bind("<FocusOut>", release_all)
-    for key, dx, dy in (("Left", -100, 0), ("Right", 100, 0), ("Up", 0, -100), ("Down", 0, 100)):
-        root.bind(f"<KeyPress-{key}>", lambda event, dx=dx, dy=dy: press(event, lambda: nudge(dx, dy)))
+    for key, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, -1), ("Down", 0, 1)):
+        root.bind(f"<KeyPress-{key}>", lambda event, dx=dx, dy=dy: press_direction(event, dx, dy))
     for key, angle in (("q", -TURN_STEP), ("Q", -TURN_STEP), ("d", TURN_STEP), ("D", TURN_STEP)):
         root.bind(f"<KeyPress-{key}>", lambda event, angle=angle: press(event, lambda: simulation.turn_by(angle)))
     for number, (digit, azerty) in enumerate(digit_keys, 1):
