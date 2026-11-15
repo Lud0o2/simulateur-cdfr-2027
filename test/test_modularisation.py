@@ -8,6 +8,8 @@ import numpy as np
 
 from src.actions.construction import construction_retenue, peut_construire
 from src.composition import composer, profil_defaut, resoudre
+from src.reseaux.constante import Constante
+from src.reseaux.lineaire import Lineaire
 from src.domaine.modele import Candidat, Observation
 from src.domaine.robot import CAPACITES, Construction, Mouvement, RobotSpec, Ventouse
 from src.planification.astar import AstarPlanner
@@ -110,6 +112,14 @@ class ReplayPlayerTest(TestCase):
 
 
 class CompositionTest(TestCase):
+    def test_network_variants_are_registered(self):
+        self.assertIs(resoudre("reseau", "lineaire"), Lineaire)
+        self.assertIs(resoudre("reseau", "constante"), Constante)
+        lineaire = Lineaire(np.random.default_rng(0))
+        constante = Constante(2.0)
+        self.assertEqual(constante.predict(np.zeros((2, 97), dtype=np.float32)).tolist(), [2.0, 2.0])
+        self.assertEqual(lineaire.predict(np.zeros((2, 97), dtype=np.float32)).shape, (2,))
+
     def test_default_composition_resolves(self):
         composition = composer(profil_defaut())
         self.assertEqual(composition.planificateur.id, "astar")

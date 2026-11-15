@@ -8,7 +8,7 @@ from ..evaluation.scenarios import officiel_2027
 from ..planification.astar import AstarPlanner
 from ..recompenses.construction_temps import ConstructionTemps
 from ..reseaux.caracteristiques import EncodeurCaracteristiques
-from ..reseaux.mlp import Network
+from .registry import resoudre
 from ..selection.glouton import Glouton
 from ..selection.reseau import MatchPolicy
 from .config import Profil, defaut
@@ -32,7 +32,7 @@ def composer(profil: Profil | None = None) -> Composition:
     selecteur = Glouton()
     encodeur = None
     if profil.selection == "reseau" and Path(profil.modele).exists():
-        reseau = Network.load(profil.modele)
+        reseau = resoudre("reseau", profil.reseau).load(profil.modele)
         selecteur = MatchPolicy(reseau)
         encodeur = EncodeurCaracteristiques()
     return Composition(

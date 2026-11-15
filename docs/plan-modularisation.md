@@ -1100,7 +1100,7 @@ Implémenté :
 - déroulement du match et enregistrement des replays ;
 - replay : format, lecture, sauvegarde, index et lecteur sans Tkinter ;
 - infrastructure : ressources, horloge, aléa, reporting, notification ;
-- réseaux : caractéristiques, MLP, mutation, mémoire, optimiseur, stockage ;
+- réseaux : caractéristiques, MLP, linéaire, constante, mutation, mémoire, optimiseur, stockage ;
 - sélection : glouton, aléatoire, epsilon, politique réseau ;
 - récompenses : construction, construction + temps, retour, déposes, sparse ;
 - évaluation : scénarios, métriques, benchmark ;

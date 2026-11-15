@@ -33,6 +33,12 @@ python -B -m src.app replay
 python -B -m src.app ui
 ```
 
+Choisis un profil de composition avec `--profil`, par exemple `configs/reseau.toml` pour jouer avec le réseau sauvegardé.
+
+```powershell
+python -B -m src.app match --profil configs/reseau.toml
+```
+
 Les commandes historiques `python -B -m src.match`, `python -B -m src.reseau` et `python -B -m src.interface` restent disponibles.
 
 **Jouer un match de référence, puis ouvrir son replay**

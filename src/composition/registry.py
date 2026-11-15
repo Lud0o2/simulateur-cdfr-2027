@@ -23,7 +23,11 @@ FABRIQUES = {
         "aleatoire": "src.selection.aleatoire:Aleatoire",
         "reseau": "src.selection.reseau:MatchPolicy",
     },
-    "reseau": {"mlp": "src.reseaux.mlp:Network"},
+    "reseau": {
+        "mlp": "src.reseaux.mlp:Network",
+        "lineaire": "src.reseaux.lineaire:Lineaire",
+        "constante": "src.reseaux.constante:Constante",
+    },
 }
 
 

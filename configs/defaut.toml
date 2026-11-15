@@ -1,0 +1,21 @@
+[robot]
+id = "robotronik"
+
+[terrain]
+id = "officiel_2027"
+
+[scenario]
+id = "officiel_2027"
+
+[planification]
+id = "astar"
+
+[recompense]
+id = "construction_temps"
+
+[selection]
+id = "glouton"
+
+[reseau]
+id = "mlp"
+modele = "reseau.npz"

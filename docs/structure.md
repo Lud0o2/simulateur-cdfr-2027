@@ -10,6 +10,9 @@ simulateur-cdfr-2027/
 ├── requirements.txt
 ├── app.py                      # via python -m src.app
 ├── assets/tapis_2027.png
+├── configs/
+│   ├── defaut.toml
+│   └── reseau.toml
 ├── docs/
 ├── replays/                    (ignoré par git)
 ├── reseau.npz                  (ignoré par git)
