@@ -10,7 +10,7 @@ from ..domaine.geometrie import (
     polygon_contact, rectangle_corners, table_contact as _table_contact,
     throne_room_score as _throne_room_score,
 )
-from ..domaine.modele import Block, Movement, Point, SuctionCup
+from ..domaine.modele import Block, Movement, Point, Rectangle, SuctionCup
 from ..regles.score_2027 import construction_score, scoring_zones, table_contact, throne_room_score
 from ..robots.spec import RobotGeometry
 from ..terrains.officiel_2027 import START_BLOCKS, TERRAIN
