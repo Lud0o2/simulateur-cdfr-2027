@@ -233,11 +233,11 @@ Le détail des 97 entrées est dans [`domaine-et-regles.md`](domaine-et-regles.m
 | --- | --- |
 | `Simulation` utilise encore le terrain et le score officiels par défaut. | Un terrain alternatif doit fournir `TerrainSpec` et les fonctions de score associées. |
 | `simulateur.py` et `match.py` restent des façades très larges. | Les nouveaux modules doivent importer les paquets directs, pas les façades. |
-| `reseau.py` garde la boucle d'entraînement et ses dépendances. | La façade `reseaux/entrainement.py` existe, mais la boucle n'est pas encore complètement déplacée. |
-| `ui/window.py` garde les contrôleurs Tkinter imbriqués. | `ui/canvas_renderer.py` et `ui/manual_controller.py` sont utilisés, mais `replay_controller.py` n'est pas encore branché dans la fenêtre. |
-| Les actions sont encore des fonctions, pas des classes `Action`. | Les capacités de construction sont vérifiées par `actions/construction.py`, mais `Composition.actions` est vide. |
+| `reseau.py` reste la façade CLI de l'entraînement. | La boucle est dans `reseaux/entrainement.py` et reçoit ses dépendances par `ContexteEntrainement`. |
+| `ui/window.py` garde les liaisons Tkinter et la boucle principale. | Le rendu d'état, le clavier, le contrôleur manuel et le contrôleur de replay sont dans `ui/`. |
+| Les actions existent en classes `Action`, mais le déroulement appelle encore les fonctions historiques. | `Composition.actions` est rempli et filtré par capacité ; le branchement complet dans `play_match` reste à faire. |
 | Un seul robot est simulé. | Les duels et les adversaires ne sont pas encore branchés. |
-| Les tours et les portes ne sont pas des actions de construction. | Le TOML peut déclarer la capacité, mais le score et la construction correspondants restent à faire. |
+| Les tours et les portes ne sont pas constructibles avec le modèle actuel de piles de 3 pierres. | Le barème et les classes d'action existent ; il faut modéliser les pierres individuellement. |
 
 ## Règles de dépendance recommandées
 

@@ -13,3 +13,4 @@ class ScenarioSpec:
     obstacles: tuple[Rectangle, ...] = ()
     piles_initiales: tuple[Rectangle, ...] = field(default_factory=tuple)
     graine: int | None = None
+    adversaires: tuple[RobotSpec, ...] = field(default_factory=tuple)

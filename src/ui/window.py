@@ -4,7 +4,8 @@ from time import perf_counter
 from ..simulateur import TABLE_HEIGHT, TABLE_WIDTH, TURN_STEP, Simulation
 from .assets import charger_tapis
 from .canvas_renderer import etat_robot
-from .manual_controller import RepeteurClavier
+from .manual_controller import ControleurManuel, RepeteurClavier
+from .replay_controller import ControleurReplayTk
 from .theme import Theme
 
 BORDER = 22
@@ -178,66 +179,7 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     viewport.bind("<Configure>", fit_board)
 
     if replay is not None:
-        playing = True
-        dragging = False
-        last_frame = perf_counter()
-
-        def refresh():
-            nonlocal playing
-            finished = replay.time >= replay.duration
-            if finished and not dragging:
-                playing = False
-            button.configure(text="Pause" if playing else "Relancer" if finished else "Reprendre")
-            draw()
-
-        def toggle():
-            nonlocal playing, last_frame
-            playing = not playing
-            last_frame = perf_counter()
-            if playing and replay.time >= replay.duration:
-                timeline.set(replay.start)
-            else:
-                refresh()
-
-        def seek(value):
-            replay.time = float(value)
-            refresh()
-
-        def drag(event):
-            nonlocal dragging
-            dragging = True
-            timeline.focus_set()
-            timeline.set(timeline.get(event.x, event.y))
-            return "break"
-
-        def release_drag(_event):
-            nonlocal dragging, last_frame
-            dragging = False
-            last_frame = perf_counter()
-            refresh()
-
-        def tick_replay():
-            nonlocal last_frame
-            now = perf_counter()
-            if playing and not dragging:
-                timeline.set(min(replay.duration, replay.time + now - last_frame))
-            last_frame = now
-            root.after(16, tick_replay)
-
-        controls = tk.Frame(footer, bg=surface)
-        controls.pack(fill="x")
-        button = ttk.Button(controls, command=toggle, width=10, style="Panel.TButton")
-        button.pack(side="left", padx=(0, 10))
-        timeline = ttk.Scale(
-            controls, from_=replay.start, to=replay.duration, value=replay.time, command=seek,
-            style="Replay.Horizontal.TScale", cursor="hand2",
-        )
-        timeline.pack(side="left", expand=True, fill="x")
-        timeline.bind("<Button-1>", drag)
-        timeline.bind("<B1-Motion>", drag)
-        timeline.bind("<ButtonRelease-1>", release_drag)
-        refresh()
-        tick_replay()
+        ControleurReplayTk(root, footer, replay, surface, draw, tk=tk, ttk=ttk)
         return root
 
     cup_targets = {item: number for number, items in enumerate(cup_items, 1) for item in items}
@@ -256,20 +198,10 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         font=(font, 9),
     ).pack(anchor="w")
 
-    def click(event):
-        if not scale:
-            return
-        current = canvas.find_withtag("current")
-        if current and current[0] in cup_targets:
-            simulation.toggle_suction(cup_targets[current[0]])
-            return
-        x, y = (event.x - border) / scale, (event.y - border) / scale
-        if 0 <= x <= TABLE_WIDTH and 0 <= y <= TABLE_HEIGHT:
-            simulation.move_to(x, y)
-
-    def nudge(dx, dy):
-        x, y = simulation.position
-        simulation.move_to(x + dx, y + dy)
+    manuel = ControleurManuel(canvas, simulation, cup_targets=cup_targets,
+                              etat=lambda: (scale, border))
+    click = manuel.click
+    nudge = manuel.nudge
 
     clavier = RepeteurClavier(root)
     press = clavier.press

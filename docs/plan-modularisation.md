@@ -1091,11 +1091,11 @@ La modularisation est considérée terminée lorsque :
 Implémenté :
 
 - domaine pur : géométrie, modèle, robot, scénario, score ;
-- terrain officiel et barème 2027 ;
+- terrain officiel et barème 2027 (`§ E.1` : 1 point par pierre, 5 par mur, 5 par tour, 20 par porte) ;
 - chargement TOML avec `construction`, `[mouvement]` et `planificateur` ;
 - moteur physique Pymunk découplé par `RobotGeometry`, `TerrainSpec` et les modules de pile, freinage et préhenseur ;
 - planification A* et planificateur direct ;
-- actions de prise, dépose, approche, retour et capacités de construction ;
+- actions de prise, dépose, approche, retour et classes `Action` pour les constructions ;
 - stratégies de référence et par lots ;
 - déroulement du match et enregistrement des replays ;
 - replay : format, lecture, sauvegarde, index et lecteur sans Tkinter ;
@@ -1104,14 +1104,15 @@ Implémenté :
 - sélection : glouton, aléatoire, epsilon, politique réseau ;
 - récompenses : construction, construction + temps, retour, déposes, sparse ;
 - évaluation : scénarios, métriques, benchmark ;
-- composition, registre, application unifiée et CLI ;
-- interface découpée en thème, assets, rendu d'état, clavier et fenêtre.
+- composition, registre, application unifiée, profils `configs/` et CLI ;
+- boucle d'entraînement déplacée dans `reseaux/entrainement.py` avec injection des dépendances ;
+- interface découpée en thème, assets, rendu d'état, clavier, contrôleur manuel, contrôleur de replay et fenêtre ;
+- second robot `robots/rectangle_demo` et champ `adversaires` dans `ScenarioSpec` ;
+- tests de capacités, contrats, registre, planification, récompense, replay, isolation et permutation.
 
 Reste à faire :
 
-- déplacer complètement la boucle d'entraînement de `reseau.py` vers `reseaux/entrainement.py` avec injection des dépendances ; la façade existe déjà ;
-- extraire les contrôleurs Tkinter complets (`manual_controller`, `replay_controller`) de `ui/window.py` ; les briques existent, la fenêtre les utilise partiellement ;
-- transformer les actions en classes `Action` complètes et les brancher dans `Composition.actions` ;
-- implémenter les constructions `tour` et `porte` comme actions et citer les points du règlement ;
-- ajouter les tests de permutation complets prévus en section 10 ;
-- préparer plusieurs robots et les duels.
+- modéliser les pierres individuellement pour construire réellement les tours (1 pierre verticale) et les portes (2 pierres verticales + 1 horizontale) ; le barème est déjà encodé ;
+- faire évoluer `MoteurPhysique` pour plusieurs robots simultanés et brancher les duels ;
+- compléter les tests de permutation sur des matchs complets, pas seulement sur les contrats ;
+- ajouter d'autres robots différentiels et leurs modèles de mouvement.

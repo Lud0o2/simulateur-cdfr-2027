@@ -30,3 +30,31 @@ class RepeteurClavier:
             if timer is not None:
                 self.root.after_cancel(timer)
         self.held.clear()
+
+
+class ControleurManuel:
+    """Clics et déplacements clavier du pilotage manuel."""
+
+    def __init__(self, canvas, simulation, *, cup_targets, etat):
+        self.canvas = canvas
+        self.simulation = simulation
+        self.cup_targets = cup_targets
+        self.etat = etat
+
+    def click(self, event):
+        scale, border = self.etat()
+        if not scale:
+            return
+        current = self.canvas.find_withtag("current")
+        if current and current[0] in self.cup_targets:
+            self.simulation.toggle_suction(self.cup_targets[current[0]])
+            return
+        from ..terrains.officiel_2027 import TABLE_HEIGHT, TABLE_WIDTH
+
+        x, y = (event.x - border) / scale, (event.y - border) / scale
+        if 0 <= x <= TABLE_WIDTH and 0 <= y <= TABLE_HEIGHT:
+            self.simulation.move_to(x, y)
+
+    def nudge(self, dx, dy):
+        x, y = self.simulation.position
+        self.simulation.move_to(x + dx, y + dy)

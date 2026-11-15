@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..actions import ACTIONS
 from ..domaine.scenario import ScenarioSpec
 from ..evaluation.scenarios import officiel_2027
 from ..planification.astar import AstarPlanner
@@ -35,10 +36,14 @@ def composer(profil: Profil | None = None) -> Composition:
         reseau = resoudre("reseau", profil.reseau).load(profil.modele)
         selecteur = MatchPolicy(reseau)
         encodeur = EncodeurCaracteristiques()
+    actions = tuple(
+        action for action in ACTIONS
+        if action.construction is None or scenario.robot.supports(action.construction)
+    )
     return Composition(
         scenario=scenario,
         planificateur=AstarPlanner(),
-        actions=(),
+        actions=actions,
         recompense=ConstructionTemps(),
         selecteur=selecteur,
         reseau=reseau,

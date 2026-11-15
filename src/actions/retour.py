@@ -60,3 +60,17 @@ def _return_home(simulation, record, planner=None):
             return
 
 
+
+
+class Retour:
+    id = "retour"
+    construction = None
+
+    def candidats(self, ctx):
+        from ..domaine.modele import Candidat
+
+        return (Candidat("retour", 0.0, 0.0),)
+
+    def executer(self, ctx, candidat) -> bool:
+        _return_home(ctx.moteur, lambda *_: None, planner=ctx.planificateur)
+        return True

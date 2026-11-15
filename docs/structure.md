@@ -362,7 +362,7 @@ L'interface ne contient aucune règle de jeu ni aucun calcul de collision.
 
 ## `test/test_simulateur.py`
 
-Un seul fichier `unittest`, quatre classes, 78 tests.
+Deux fichiers `unittest` : `test_simulateur.py` pour le comportement historique et `test_modularisation.py` pour les contrats, capacités et isolations. Ensemble : 92 tests.
 
 | Classe | Nombre | Couverture |
 | --- | --- | --- |

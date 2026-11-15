@@ -1,0 +1,15 @@
+nom = "rectangle_demo"
+planificateur = "direct"
+
+contour_mm = [[-120, -80], [120, -80], [120, 80], [-120, 80]]
+
+[mouvement]
+type = "holonome"
+vitesse_mm_s = 600
+acceleration_mm_s2 = 800
+masse_kg = 3.0
+
+[[ventouses]]
+position_mm = [120, 0]
+angle_deg = 0
+construction = "tour"

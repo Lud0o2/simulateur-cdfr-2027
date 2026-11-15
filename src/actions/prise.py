@@ -34,3 +34,25 @@ def _take_pickup(simulation, pile, cup, pickup, *, advance=None, deadline=None):
     return True
 
 
+
+
+class Prise:
+    id = "prise"
+    construction = None
+
+    def candidats(self, ctx):
+        from ..domaine.modele import Candidat
+
+        blocks = ctx.moteur.blocks
+        for index, block in enumerate(blocks):
+            if any(ctx.moteur.held_pile(cup) == index for cup in range(1, len(ctx.robot.spec.ventouses) + 1)):
+                continue
+            for cup in range(1, len(ctx.robot.spec.ventouses) + 1):
+                if ctx.moteur.held_pile(cup) is None:
+                    yield Candidat("prise", 0.0, 0.0, payload={"pile": index, "cup": cup})
+
+    def executer(self, ctx, candidat) -> bool:
+        return take_pile(
+            ctx.moteur, candidat.payload["pile"], candidat.payload["cup"],
+            deadline=ctx.deadline, planner=ctx.planificateur,
+        )

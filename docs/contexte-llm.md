@@ -132,7 +132,7 @@ python -B -m src.reseau compare
 python -B -m src.interface
 ```
 
-Le temps des 78 tests est d'environ 8 secondes sur la machine de référence. Une modification qui fait exploser ce temps doit être examinée.
+Le temps des 92 tests est d'environ 9 secondes sur la machine de référence. Une modification qui fait exploser ce temps doit être examinée.
 
 ## Glossaire
 

@@ -6,21 +6,25 @@ from unittest.mock import mock_open, patch
 
 import numpy as np
 
+from src.actions import ACTIONS
 from src.actions.construction import construction_retenue, peut_construire
 from src.composition import composer, profil_defaut, resoudre
 from src.reseaux.constante import Constante
 from src.reseaux.lineaire import Lineaire
 from src.domaine.modele import Candidat, Observation
 from src.domaine.robot import CAPACITES, Construction, Mouvement, RobotSpec, Ventouse
+from src.domaine.scenario import ScenarioSpec
 from src.planification.astar import AstarPlanner
 from src.planification.base import DemandeTrajet
 from src.planification.direct import DirectPlanner
 from src.recompenses.base import Transition
+from src.regles.bareme import Bareme2027
 from src.recompenses.construction_temps import ConstructionTemps
 from src.replay.lecture import Replay
 from src.replay.player import LecteurReplay
 from src.robots.loader import load_robot_spec
 from src.selection.aleatoire import Aleatoire
+from src.selection.epsilon import EpsilonGlouton
 from src.selection.glouton import Glouton
 from src.terrains.officiel_2027 import TERRAIN
 
@@ -31,6 +35,13 @@ class CapabilityTest(TestCase):
         self.assertEqual(CAPACITES[Construction.TOUR], {Construction.TOUR, Construction.MUR})
         self.assertEqual(CAPACITES[Construction.PORTE],
                          {Construction.PORTE, Construction.TOUR, Construction.MUR})
+
+    def test_bareme_construction_values(self):
+        bareme = Bareme2027()
+        self.assertEqual(bareme.points_pierre, 1)
+        self.assertEqual(bareme.points_construction(Construction.MUR), 5)
+        self.assertEqual(bareme.points_construction(Construction.TOUR), 5)
+        self.assertEqual(bareme.points_construction(Construction.PORTE), 20)
 
     def test_robot_spec_filters_actions(self):
         spec = RobotSpec("test", ((0, 0), (10, 0), (0, 10)), (
@@ -112,6 +123,42 @@ class ReplayPlayerTest(TestCase):
 
 
 class CompositionTest(TestCase):
+    def test_all_rewards_and_selectors_are_usable(self):
+        avant = Observation((0, 0, 0), (), {}, 10, 0.0)
+        apres = Observation((0, 0, 0), (), {}, 18, 1.0)
+        transition = Transition(avant, Candidat("depose", 8, 1), apres,
+                                {"score": 18, "duree": 20, "score_retour": 5})
+        for name in ("construction", "construction_temps", "retour", "depots", "sparse"):
+            reward = resoudre("recompense", name)()
+            self.assertIsInstance(reward.valeur(transition), float)
+            self.assertEqual(len(reward.rang({"score": 10, "duree": 20})), 2)
+        candidats = [Candidat("a", 2, 2), Candidat("b", 3, 1)]
+        for name in ("glouton",):
+            self.assertEqual(len(resoudre("selection", name)().classer(None, candidats)), 2)
+        aleatoire = Aleatoire(np.random.default_rng(0))
+        self.assertEqual(len(aleatoire.classer(None, candidats)), 2)
+        epsilon = EpsilonGlouton(Glouton(), np.random.default_rng(0), 1.0)
+        self.assertEqual(len(epsilon.classer(None, candidats)), 2)
+
+    def test_action_catalog_filters_by_capability(self):
+        composition = composer(profil_defaut())
+        noms = {action.id for action in composition.actions}
+        self.assertIn("prise", noms)
+        self.assertIn("depose", noms)
+        self.assertIn("retour", noms)
+        self.assertIn("construire_mur", noms)
+        self.assertNotIn("construire_tour", noms)
+        self.assertNotIn("construire_porte", noms)
+        self.assertTrue(any(action.id == "construire_tour" for action in ACTIONS))
+
+    def test_second_robot_is_available(self):
+        robot = resoudre("robot", "rectangle_demo")()
+        self.assertEqual(robot.planificateur, "direct")
+        self.assertEqual(robot.ventouses[0].construction, Construction.TOUR)
+        principal = resoudre("robot", "robotronik")()
+        scenario = ScenarioSpec(TERRAIN, principal, adversaires=(robot,))
+        self.assertEqual(scenario.adversaires[0].id, "rectangle_demo")
+
     def test_network_variants_are_registered(self):
         self.assertIs(resoudre("reseau", "lineaire"), Lineaire)
         self.assertIs(resoudre("reseau", "constante"), Constante)

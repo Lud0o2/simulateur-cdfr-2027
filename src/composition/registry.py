@@ -4,7 +4,10 @@ from importlib import import_module
 
 
 FABRIQUES = {
-    "robot": {"robotronik": "src.robots.robotronik:construire"},
+    "robot": {
+        "robotronik": "src.robots.robotronik:construire",
+        "rectangle_demo": "src.robots.rectangle_demo:construire",
+    },
     "terrain": {"officiel_2027": "src.terrains.officiel_2027:construire"},
     "scenario": {"officiel_2027": "src.evaluation.scenarios:officiel_2027"},
     "planification": {

@@ -49,3 +49,18 @@ def place_pile(simulation: Simulation, cup: int, x: float, y: float, angle: floa
     return True
 
 
+
+
+class Depose:
+    id = "depose"
+    construction = None
+
+    def candidats(self, ctx):
+        return ()
+
+    def executer(self, ctx, candidat) -> bool:
+        payload = candidat.payload
+        return place_pile(
+            ctx.moteur, payload["cup"], payload["x"], payload["y"], payload["angle"],
+            deadline=ctx.deadline, planner=ctx.planificateur,
+        )
