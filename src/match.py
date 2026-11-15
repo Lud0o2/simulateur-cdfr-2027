@@ -19,7 +19,7 @@ from pymunk import Vec2d
 from .simulateur import (
     CONTACT_GAP, DRIVE_ACCELERATION, PHYSICS_STEP, START, TABLE_HEIGHT, TABLE_WIDTH, THRONE_ROOM,
     TOWER_CENTERS, TOWER_RADIUS, TURN_SPEED, WALL_ZONES, Block, Simulation, _finite_number, _polygon_bounds as _bounds,
-    construction_score, contact_axes, free_wall_slots, polygon_contact, rectangle_corners, scoring_zones,
+    construction_score, contact_axes, polygon_contact, rectangle_corners, scoring_zones,
     swept_contact, table_contact, throne_room_score, travel_time,
 )
 
@@ -54,11 +54,7 @@ DROP_ANGLES = tuple(radians(angle) for angle in range(-90, 90, 10))
 ALTERNATE_DROPS = tuple(
     (site + Vec2d(length, width).rotated(axis), axis + rotation)
     for site, axis in CENTERED_DROPS
-    for length, width in (
-        (0, 0), (0, -120), (0, 120),
-        (-200, 0), (200, 0),
-        (-120, -160), (120, 160),
-    )
+    for length, width in ((0, 0), (0, -120), (0, 120), (-120, -160))
     for rotation in DROP_ANGLES
 )
 
@@ -118,6 +114,11 @@ class Plan:
 
 def _clear(start, end, footprints, obstacles):
     return _clear_bounded(start, end, tuple((shape, _bounds(shape)) for shape in footprints), obstacles)
+
+
+@lru_cache(maxsize=4096)
+def _rotated_footprint(footprint, angle):
+    return tuple(Vec2d(*corner).rotated(angle) for corner in footprint)
 
 
 def _clear_bounded(start, end, footprints, obstacles, margin=0):
@@ -291,8 +292,9 @@ def _approach(start, end, angle, footprints, obstacles) -> Approach | None:
         return Approach(duration, (), 0, path) if path else None
 
     polygons = tuple(corners for corners, _ in obstacles)
-    rotated = tuple(tuple(Vec2d(*corner).rotated(angle) for corner in shape) for shape in footprints)
-    if not _clear(end, end, rotated, obstacles):
+    rotated = tuple(_rotated_footprint(shape, angle) for shape in footprints)
+    clear_after = _visibility(rotated, obstacles, 0)
+    if not clear_after(end, end):
         return None
     best = None
     turn_time = abs(angle) / TURN_SPEED
@@ -318,7 +320,6 @@ def _approach(start, end, angle, footprints, obstacles) -> Approach | None:
     pivots = [(_segment_time(start, pivot), _segment_time(pivot, end), pivot)
               for pivot in dict.fromkeys(pivots)]
     clear_before = _visibility(footprints, obstacles, 0)
-    clear_after = _visibility(rotated, obstacles, 0)
     for first_direct, last, pivot in sorted(pivots, key=lambda p: p[0] + p[1]):
         remaining = best.duration - turn_time if best else float("inf")
         # Une petite marge protège les départages aux erreurs d'arrondi.
@@ -632,7 +633,7 @@ def _frame(simulation, label):
     }
 
 
-def _play_batches(simulation, record, policy, drop_poses, multiple_drops):
+def _play_batches(simulation, record, policy, drop_poses):
     """Charge les ventouses disponibles et dépose les piles une par une."""
     def perform(action, label, **choice):
         def advance(seconds):
@@ -648,9 +649,6 @@ def _play_batches(simulation, record, policy, drop_poses, multiple_drops):
         while len(held) < len(cups) and simulation.time < BUILD_DEADLINE:
             blocks = simulation.blocks
             carried = set(held.values())
-            if not multiple_drops and len(held) >= free_wall_slots(
-                    block for index, block in enumerate(blocks) if index not in carried):
-                break
             free_cups = tuple(cup for cup in cups if cup not in held)
             choices = []
             approaches = {}
@@ -700,21 +698,19 @@ def _play_batches(simulation, record, policy, drop_poses, multiple_drops):
             blocks = simulation.blocks
             sites = tuple(scoring_zones(block) for index, block in enumerate(blocks) if index not in held.values())
             score = construction_score(sites)
-            if multiple_drops:
-                start, _, obstacles = _action_state(simulation)
-            else:
-                start = Vec2d(*simulation.position)
+            start, _, obstacles = _action_state(simulation)
             placements = []
             for cup, index in held.items():
                 block = blocks[index]
                 center = Vec2d(*block.position)
+                footprint = tuple(Vec2d(*corner) - center for corner in block.corners)
                 for site, angle in drop_poses:
                     axis_turn = remainder(angle - block.angle, 2 * pi)
-                    relative = tuple((Vec2d(*corner) - center).rotated(axis_turn) for corner in block.corners)
+                    relative = _rotated_footprint(footprint, axis_turn)
                     corners = tuple(tuple(site + corner) for corner in relative)
                     projected = Block(tuple(site), angle, corners)
-                    zones = _wall_drop_zones(projected) if multiple_drops else scoring_zones(projected)
-                    if multiple_drops and (not zones[1] or not _clear(site, site, (relative,), obstacles)):
+                    zones = _wall_drop_zones(projected)
+                    if not zones[1] or not _clear(site, site, (relative,), obstacles):
                         continue
                     gain = construction_score((*sites, zones)) - score
                     # À gain égal, éviter de remplir d'abord le passage central des remparts.
@@ -823,14 +819,10 @@ def play_match(simulation: Simulation, *, batches=False, policy=None, record_fra
     offsets = getattr(policy, "drop_offsets", None)
     angles = getattr(policy, "drop_angles", ALIGNED_ANGLES)
     if batches:
-        multiple_drops = getattr(policy, "multiple_drops", True)
-        if multiple_drops:
-            angles = tuple(min(DROP_ANGLES, key=lambda candidate: abs(remainder(candidate - angle, pi)))
-                           for angle in angles)
+        angles = tuple(min(DROP_ANGLES, key=lambda candidate: abs(remainder(candidate - angle, pi)))
+                       for angle in angles)
         drop_poses = _shifted_drops(offsets, angles) if offsets else CENTERED_DROPS
-        if multiple_drops:
-            drop_poses = tuple(dict.fromkeys((*drop_poses, *ALTERNATE_DROPS)))
-        _play_batches(simulation, record, policy, drop_poses, multiple_drops)
+        _play_batches(simulation, record, policy, tuple(dict.fromkeys((*drop_poses, *ALTERNATE_DROPS))))
     else:
         _play_reference(simulation, record)
 
@@ -1006,7 +998,6 @@ def completion_beep():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("compare", help="Compare la stratégie multi-piles à la référence et garde son replay.")
     player = commands.add_parser("replay", help="Ouvre le dernier essai ou le numéro indiqué.")
     player.add_argument("number", nargs="?", type=int)
     args = parser.parse_args()
@@ -1026,24 +1017,13 @@ def main():
     else:
         try:
             start = perf_counter()
-            if args.command == "compare":
-                reference = play_match(Simulation(), record_frames=False)["score"]
-                start = perf_counter()
-                replay = play_match(Simulation(), batches=True)
-                score = replay["score"]
-                replay.update(strategie="multi_piles", score_reference=reference)
-                print(f"Table officielle · référence {reference} points · multi-piles {score} points "
-                      f"({score - reference:+d})")
-            else:
-                replay = play_match(Simulation())
+            replay = play_match(Simulation())
             elapsed = perf_counter() - start
-            number, path = save_replay(replay)
+            number, _ = save_replay(replay)
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")
         print(f"Essai {number} · {replay['score']} points en {replay['duree']:.2f} s simulées "
-              f"(calcul : {elapsed:.2f} s)")
-        print(f"Replay : {path}")
-        print(f"python -B -m src.match replay {number}", flush=True)
+              f"(calcul : {elapsed:.2f} s)", flush=True)
         completion_beep()
 
 

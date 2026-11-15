@@ -132,6 +132,9 @@ def _polygon_bounds(polygon):
     return min(xs), min(ys), max(xs), max(ys)
 
 
+_BOUNDED_WALL_ZONES = tuple((zone, _polygon_bounds(zone)) for zone in WALL_ZONES)
+
+
 def polygon_contact(
     position: Point, delta: Point, corners: tuple[Point, ...], footprint: tuple[Point, ...],
     *, include_boundary: bool = False,
@@ -270,8 +273,12 @@ class _Pile:
 
 @lru_cache(maxsize=4096)
 def scoring_zones(block: Block) -> tuple[tuple[int, ...], bool]:
-    walls = tuple(index for index, zone in enumerate(WALL_ZONES) if
-                  polygon_contact((0, 0), (0, 0), zone, block.corners, include_boundary=True) < 1)
+    left, top, right, bottom = _polygon_bounds(block.corners)
+    # La tolérance sur les axes obliques peut dépasser CONTACT_GAP une fois projetée sur x ou y.
+    gap = 2 * CONTACT_GAP
+    walls = tuple(index for index, (zone, (x1, y1, x2, y2)) in enumerate(_BOUNDED_WALL_ZONES)
+                  if x1 <= right + gap and left <= x2 + gap and y1 <= bottom + gap and top <= y2 + gap
+                  and polygon_contact((0, 0), (0, 0), zone, block.corners, include_boundary=True) < 1)
     if walls:
         return walls, True
     origin = pymunk.Vec2d(*block.position)

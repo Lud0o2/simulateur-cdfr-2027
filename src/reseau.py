@@ -4,8 +4,7 @@ import argparse
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
-from copy import copy, deepcopy
-import json
+from copy import copy
 from math import cos, hypot, pi, remainder, sin
 import os
 from pathlib import Path
@@ -16,8 +15,9 @@ import numpy as np
 from pymunk import Vec2d
 
 from .match import (
-    ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES, MATCH_SECONDS, REPLAY_DIR, Replay, _action_state, _clear, _drop_target,
-    _pickup_approach, _shifted_drops, _trials, _wall_drop_zones, completion_beep, play_match, save_replay,
+    ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES, MATCH_SECONDS, REPLAY_DIR, _action_state, _drop_target,
+    _pickup_approach, _rotated_footprint, _visibility, _wall_drop_zones,
+    completion_beep, play_match, save_replay,
 )
 from .simulateur import Block, START_BLOCKS, TABLE_HEIGHT, TABLE_WIDTH, WALL_ZONES, Simulation, free_wall_slots, scoring_zones
 
@@ -78,7 +78,7 @@ def features(simulation, held, choices, *, pickup, pickup_plans=None):
     for choice in choices:
         if choice is None:
             # Termine le chargement si une ventouse est occupée, ou demande le retour.
-            rows.append([*state, -1, *([0] * (LAYERS[0] - 80))])
+            rows.append([-1, *([0] * (LAYERS[0] - len(state) - 1))])
             continue
         if action_state is None:
             action_state = _action_state(simulation)
@@ -95,18 +95,22 @@ def features(simulation, held, choices, *, pickup, pickup_plans=None):
             gain, duration, cup, position, angle = choice
             block = blocks[held[cup]]
             end, turn = _drop_target(block, Vec2d(*position), angle, start)
-            rotated = tuple(tuple(Vec2d(*corner).rotated(turn) for corner in shape) for shape in footprints)
             polygon = tuple(tuple(end + (Vec2d(*corner) - start).rotated(turn)) for corner in block.corners)
             # Évalue la pose finale. Le simulateur calcule le trajet seulement pour une pose essayée.
-            valid = (_wall_drop_zones(Block(tuple(position), block.angle + turn, polygon))[1]
-                     and _clear(end, end, rotated, obstacles))
-            distance = start.get_distance(end) if valid else -TABLE_DIAGONAL
+            distance = -TABLE_DIAGONAL
+            if _wall_drop_zones(Block(tuple(position), block.angle + turn, polygon))[1]:
+                rotated = tuple(_rotated_footprint(shape, turn) for shape in footprints)
+                if _visibility(rotated, obstacles, 0)(end, end):
+                    distance = start.get_distance(end)
         mount, facing = simulation.geometry.mounts[cup - 1]
-        rows.append([*state, pickup, *_pose(block.position, block.angle), distance / TABLE_DIAGONAL, *_pose(position, angle),
+        rows.append([pickup, *_pose(block.position, block.angle), distance / TABLE_DIAGONAL, *_pose(position, angle),
                      *(value / 380 for value in mount), *facing, duration / 8, gain / 8,
                      (position[0] - simulation.position[0]) / TABLE_WIDTH,
                      (position[1] - simulation.position[1]) / TABLE_HEIGHT])
-    return np.asarray(rows, dtype=np.float32).reshape(-1, LAYERS[0])
+    inputs = np.empty((len(rows), LAYERS[0]), dtype=np.float32)
+    inputs[:, :len(state)] = state
+    inputs[:, len(state):] = np.asarray(rows, dtype=np.float32).reshape(len(rows), LAYERS[0] - len(state))
+    return inputs
 
 
 def _candidate_count(choices, pickup):
@@ -122,7 +126,6 @@ class Network:
         self.drop_angles = ALIGNED_ANGLES
         self.experience = {}
         self.training_matches = 0
-        self.matches_without_progress = 0
 
     def _forward(self, inputs):
         values = [inputs]
@@ -149,18 +152,6 @@ class Network:
             gradient = 2 * (values[-1] - targets[batch, None]) / len(batch)
             self._learn(values, gradient, learning_rate)
 
-    def imitate(self, examples, *, steps, learning_rate):
-        inputs = np.concatenate([rows for rows, _ in examples])
-        starts = np.cumsum([0, *(len(rows) for rows, _ in examples)])
-        expected = starts[:-1] + [index for _, index in examples]
-        for _ in range(steps):
-            values = self._forward(inputs)
-            logits = np.split(values[-1][:, 0], starts[1:-1])
-            probabilities = [np.exp(group - group.max()) for group in logits]
-            gradient = np.concatenate([group / group.sum() for group in probabilities])
-            gradient[expected] -= 1
-            self._learn(values, gradient[:, None] / len(examples), learning_rate)
-
     def _training_copy(self):
         candidate = copy(self)
         candidate.weights = [weights.copy() for weights in self.weights]
@@ -185,8 +176,7 @@ class Network:
                 np.savez(file, *self.weights, *self.biases, drop_offsets=np.asarray(self.drop_offsets),
                          drop_angles=np.asarray(self.drop_angles),
                          experience=np.concatenate(experience) if experience else np.empty((0, LAYERS[0] + 5)),
-                         training_matches=self.training_matches,
-                         matches_without_progress=self.matches_without_progress)
+                         training_matches=self.training_matches)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -231,11 +221,6 @@ class Network:
                 if type(count) is not int or count < 0:
                     raise ValueError("Compteur d’entraînement invalide.")
                 network.training_matches = count
-            if "matches_without_progress" in data:
-                count = data["matches_without_progress"].tolist()
-                if type(count) is not int or not 0 <= count <= network.training_matches:
-                    raise ValueError("Compteur de progression invalide.")
-                network.matches_without_progress = count
         return network
 
 
@@ -292,107 +277,6 @@ class MatchPolicy:
                 self.opening.append(choice[1])
 
 
-class _ReplayDemonstration:
-    multiple_drops = False  # Les démonstrations annotées désignent une seule pose par rempart.
-
-    def __init__(self, replay):
-        pickups, drops = replay.get("prises"), replay.get("depots")
-        if (not isinstance(pickups, list) or not isinstance(drops, list)
-                or not pickups or len(pickups) != len(drops)):
-            raise ValueError("Le replay doit décrire ses prises et ses dépôts.")
-        batches = replay.get("tournees", [len(pickups)])
-        if (not isinstance(batches, list) or not all(type(count) is int and count > 0 for count in batches)
-                or sum(batches) != len(pickups)):
-            raise ValueError("Tournées de démonstration invalides.")
-        self.batches = iter(batches)
-        self.remaining_pickups = next(self.batches)
-        if not all(isinstance(pick, list) and len(pick) == 2 and all(type(n) is int and n > 0 for n in pick)
-                   for pick in pickups):
-            raise ValueError("Prises de démonstration invalides.")
-        self.pickups = deque(map(tuple, pickups))
-        self.drops = deque()
-        self.drop_offsets = _read_drop_offsets(replay.get("decalages_depot_mm", CENTERED_OFFSETS))
-        self.drop_angles = _read_drop_angles(replay.get("rotations_depot_rad", ALIGNED_ANGLES))
-        drop_poses = _shifted_drops(self.drop_offsets, self.drop_angles)
-        for drop in drops:
-            if not (isinstance(drop, list) and len(drop) == 3 and all(type(n) is int for n in drop)):
-                raise ValueError("Dépôt de démonstration invalide.")
-            cup, wall, rotation = drop
-            if cup < 1 or not 1 <= wall <= len(CENTERED_DROPS) or rotation not in (0, 180):
-                raise ValueError("Dépôt de démonstration invalide.")
-            site, axis = drop_poses[wall - 1]
-            self.drops.append((cup, site, axis + (pi if rotation else 0)))
-        self.examples = []
-        self.observed = 0
-
-    def order(self, simulation, held, choices, *, pickup, can_finish=False, pickup_plans=None):
-        head = choices[:_candidate_count(choices, pickup)]
-        if can_finish:
-            head.append(None)
-        if pickup:
-            action = self.pickups.popleft() if self.remaining_pickups else None
-            selected = next((choice for choice in head if choice is not None and
-                             (choice[1] + 1, choice[2]) == action), None)
-            if selected is None and action is not None:
-                raise ValueError(f"Prise du replay inaccessible à {simulation.time:.2f} s.")
-            if selected is not None:
-                self.remaining_pickups -= 1
-        else:
-            if self.remaining_pickups or not self.drops:
-                raise ValueError("Dépôt inattendu pendant la démonstration.")
-            action = self.drops.popleft()
-            selected = next((choice for choice in head if choice[2:] == action), None)
-            if selected is None:
-                raise ValueError(f"Dépôt du replay inaccessible à {simulation.time:.2f} s.")
-            if len(held) == 1:
-                self.remaining_pickups = next(self.batches, 0)
-        if selected is None and not can_finish:
-            raise ValueError("La démonstration ne peut pas terminer le chargement.")
-        self.examples.append((features(simulation, held, head, pickup=pickup, pickup_plans=pickup_plans),
-                              head.index(selected)))
-        return [selected]
-
-    def observe(self, _choice):
-        self.observed += 1
-
-
-def _replay_examples(replay):
-    demonstration = Replay(replay)
-    simulation = Simulation()
-    policy = _ReplayDemonstration(replay)
-    if len(demonstration.frames[0]["cups"]) != len(simulation.geometry.mounts):
-        raise ValueError("Le replay utilise un autre nombre de ventouses. Il reste disponible en lecture.")
-    result = play_match(simulation, policy=policy, record_frames=False)
-    if (policy.pickups or policy.drops or policy.observed != len(policy.examples)
-            or result["score"] != replay["score"] or result["score_retour"] != replay["score_retour"]):
-        raise ValueError("Le simulateur ne reproduit pas la démonstration.")
-    return policy.examples
-
-
-def _learn_replay(network, replay):
-    examples = _replay_examples(replay)
-    best = network
-    best_rank = _replay_rank(play_match(Simulation(), policy=MatchPolicy(best), record_frames=False))
-    offsets = _read_drop_offsets(replay.get("decalages_depot_mm", CENTERED_OFFSETS))
-    angles = _read_drop_angles(replay.get("rotations_depot_rad", ALIGNED_ANGLES))
-    for rate in (0.025, 0.05, 0.075):
-        candidate = deepcopy(network)
-        candidate.drop_offsets = offsets
-        candidate.drop_angles = angles
-        for steps in (64, 64, 128, 256, 512):
-            candidate.imitate(examples, steps=steps, learning_rate=rate)
-            result = play_match(Simulation(), policy=MatchPolicy(candidate), record_frames=False)
-            rank = _replay_rank(result)
-            if rank > best_rank:
-                best, best_rank = deepcopy(candidate), rank
-    final = play_match(Simulation(), policy=MatchPolicy(best))
-    if _replay_rank(final) != best_rank:
-        raise ValueError("Le replay autonome ne reproduit pas la validation.")
-    if best is not network:
-        best.matches_without_progress = 0
-    return best, final
-
-
 def _replay_rank(replay):
     return replay["score"], -replay["duree"]
 
@@ -405,15 +289,13 @@ def _validated_replay(network, rank, seed):
     return replay
 
 
-def _simulate_match(job, *, record_frames=False):
+def _simulate_match(job):
     network, seed, warmup, resume, random_match = job
     rng = None if seed is None else np.random.default_rng(seed)
     policy = MatchPolicy(network, rng=rng, warmup=warmup, resume=resume, random_match=random_match)
-    replay = play_match(Simulation(), policy=policy, record_frames=record_frames)
+    replay = play_match(Simulation(), policy=policy, record_frames=False)
     if policy.opening and replay["score"] > replay["score_retour"]:
         replay["ouverture"] = tuple((policy.opening + [-1])[:2])
-    if random_match:
-        replay["exploration_aleatoire"] = True
     return replay, policy.history
 
 
@@ -443,58 +325,68 @@ def _training_workers(count):
     return min(count, available, 61 if os.name == "nt" else available)
 
 
-def train_matches(count, seed, incumbent=None, *, resume=False, mutate_deposits=False):
+def train_matches(count, seed, incumbent=None, *, resume=False):
     workers = _training_workers(count)
     print(f"Simulation · {workers} processus pour {count} matchs d’entraînement", flush=True)
     with (ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext()) as pool:
-        return _train_matches(count, seed, incumbent, resume, workers, pool.map if pool else map, mutate_deposits)
+        network, rank = _train_matches(count, seed, incumbent, resume, workers, pool.map if pool else map)
+    replay = _validated_replay(network, rank, seed)
+    if incumbent is not None and not resume:
+        previous, _ = _simulate_match((incumbent, None, False, False, False))
+        if _replay_rank(previous) >= rank:
+            incumbent.experience = network.experience
+            incumbent.training_matches = network.training_matches
+            network = incumbent
+    return network, replay
 
 
-def _train_endless(seed, model, incumbent, *, resume, mutate_deposits):
-    best_rank = None
+def _train_endless(seed, model, incumbent, *, resume):
+    saved_rank = None
+    session_best = None
     series = 1
     seeds = np.random.SeedSequence(seed)
     workers = _training_workers(PROGRESS_WINDOW)
 
     def record(network, rank):
-        nonlocal best_rank
-        if best_rank is None or rank > best_rank:
+        nonlocal saved_rank, session_best
+        if session_best is None or rank > session_best[1]:
+            session_best = (network, rank, seed, series)
+        if saved_rank is None or rank > saved_rank:
             network.save(model)
-            best_rank = rank
-            saved = " · poids sauvegardés"
-        else:
-            saved = ""
-        print(f"Record · série {series} · {rank[0]} points en {-rank[1]:.2f} s{saved}", flush=True)
+            saved_rank = rank
 
     try:
         if incumbent is not None:
             replay, _ = _simulate_match((incumbent, None, False, False, False))
-            best_rank = _replay_rank(replay)
+            saved_rank = _replay_rank(replay)
         with (ProcessPoolExecutor(max_workers=workers, initializer=signal.signal,
                                   initargs=(signal.SIGINT, signal.SIG_IGN)) if workers > 1 else nullcontext()) as pool:
             run_matches = pool.map if pool else map
             starting_network = incumbent if resume else None
             while True:
-                _, replay, _, _ = _train_matches(None, seed, starting_network, starting_network is not None,
-                                                  workers, run_matches, mutate_deposits, on_record=record)
-                replay.update(strategie="entrainement_endless", serie=series)
-                number, _ = save_replay(replay, descriptive=True)
-                print(f"Réinitialisation · série {series} · {PROGRESS_WINDOW} matchs sans amélioration · "
-                      f"meilleur replay {number} · nouveaux poids aléatoires", flush=True)
+                _train_matches(None, seed, starting_network, starting_network is not None,
+                               workers, run_matches, on_record=record)
                 series += 1
                 seed = int(seeds.spawn(1)[0].generate_state(1)[0])
                 starting_network = None
     except KeyboardInterrupt:
-        print("Entraînement arrêté.", flush=True)
+        if session_best is None:
+            print("Entraînement arrêté.", flush=True)
+            return
+        network, rank, best_seed, best_series = session_best
+        replay = _validated_replay(network, rank, best_seed)
+        replay.update(strategie="entrainement_endless", serie=best_series)
+        number, _ = save_replay(replay, descriptive=True)
+        print(f"Session · {rank[0]} points en {-rank[1]:.2f} s · replay {number}", flush=True)
 
 
-def _train_matches(count, seed, incumbent, resume, workers, run_matches, mutate_deposits, *, on_record=None):
+def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_record=None):
     endless = count is None
     rng = np.random.default_rng(seed)
-    mutation_rng = np.random.default_rng(seed) if mutate_deposits else None
+    mutation_rng = np.random.default_rng(seed)
     network = incumbent if resume else Network(rng)
     network_rank = None
-    stalled = 0 if endless else network.matches_without_progress
+    stalled = 0
     experience = incumbent.experience.copy() if incumbent is not None else {}
     previous_matches = incumbent.training_matches if incumbent is not None else 0
     played = previous_matches if resume else 0
@@ -502,15 +394,11 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, mutate_
     warmup_matches = max(1, (PROGRESS_WINDOW if endless else count) // 3)
     seeds = np.random.SeedSequence(seed, n_children_spawned=played)
     examples = deque(maxlen=512)
-    exploration_rank = (-1, 0)
-    exploration_job = None
-    exploration_episode = None
-    start = generation = 0
+    start = 0
     while endless or start < count:
         remaining = PROGRESS_WINDOW - stalled if endless else count - start
         size = min(workers, remaining)
         stop = start + size
-        generation += 1
         # La mémoire sert à l'apprentissage dans le processus principal.
         playing = network._for_simulation()
         jobs = [(playing, match_seed, not resume and episode < warmup_matches, resume,
@@ -518,20 +406,8 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, mutate_
                 for episode, match_seed in enumerate(seeds.spawn(size), start)]
         # Tous les matchs du lot doivent partir des mêmes poids avant leur mise à jour.
         matches = list(run_matches(_simulate_match, jobs))
-        if not endless:
-            for episode, (job, (replay, history)) in enumerate(zip(jobs, matches, strict=True), start + 1):
-                rank = _replay_rank(replay)
-                if rank > exploration_rank:
-                    exploration_rank = rank
-                    exploration_job = job
-                    exploration_episode = episode
-                mode = "Exploration aléatoire" if replay.get("exploration_aleatoire") else "Exploration"
-                print(f"{mode} {episode}/{count} · {rank[0]} points en {replay['duree']:.2f} s simulées · "
-                      f"{len(history)} décisions", flush=True)
 
-        candidates = []
-        if mutation_rng is not None:
-            candidates.extend(_mutate_drop_pose(network, mutation_rng) for _ in matches)
+        candidates = [_mutate_drop_pose(network, mutation_rng) for _ in matches]
         remembered = tuple(experience.values())
         ranked = sorted((match for match in matches if match[1]), key=lambda match: _replay_rank(match[0]), reverse=True)
         for index, (replay, history) in enumerate(ranked):
@@ -567,64 +443,32 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, mutate_
                 previous_rank = rank
             if network_rank is None or rank > network_rank:
                 network, network_rank = candidate, rank
-        improved = network_rank > previous_rank
-        stalled = 0 if improved else stalled + len(matches)
         if endless:
+            improved = network_rank > previous_rank
+            stalled = 0 if improved else stalled + len(matches)
             if improved or start == 0:
                 network.experience = experience
                 network.training_matches = previous_matches + stop
-                network.matches_without_progress = stalled
                 on_record(network, network_rank)
             if stalled == PROGRESS_WINDOW:
                 break
-        else:
-            print(f"Validation · génération {generation} · meilleur réseau "
-                  f"sans exploration {network_rank[0]} points en {-network_rank[1]:.2f} s · "
-                  f"record avec exploration {exploration_rank[0]} points en {-exploration_rank[1]:.2f} s", flush=True)
-            if improved:
-                points = network_rank[0] - previous_rank[0]
-                gain = f"+{points} points" if points else f"{network_rank[1] - previous_rank[1]:.2f} s gagnées"
-                print(f"Progression · 100 % · nouveau record autonome · {gain}", flush=True)
-            else:
-                progress = max(0, 100 * (PROGRESS_WINDOW - stalled) // PROGRESS_WINDOW)
-                plateau = " · plateau" if not progress else ""
-                print(f"Progression · {progress} % · {stalled} match(s) sans nouveau record autonome{plateau}", flush=True)
         start = stop
 
-    trained_replay = _validated_replay(network, network_rank, seed)
-    network.matches_without_progress = stalled
-    winner_replay = trained_replay
-    if incumbent is not None and not resume:
-        replay, _ = _simulate_match((incumbent, None, False, False, False))
-        rank = _replay_rank(replay)
-        if rank >= network_rank:
-            network = incumbent
-            winner_replay = _validated_replay(incumbent, rank, seed)
     network.experience = experience
     network.training_matches = previous_matches + stop
-    if endless:
-        return network, winner_replay, trained_replay, None
-    # Les poids du match et sa graine suffisent à refaire les images de l'essai retenu.
-    exploration_replay, _ = _simulate_match(exploration_job, record_frames=True)
-    if _replay_rank(exploration_replay) != exploration_rank:
-        raise ValueError("Le replay avec exploration ne reproduit pas son résultat d’entraînement.")
-    exploration_replay.update(strategie="entrainement_reseau", graine=seed, match=exploration_episode)
-    return network, winner_replay, trained_replay, exploration_replay
+    return network, network_rank
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    train = commands.add_parser("train", help="Entraîne le réseau sur la table officielle.")
+    train = commands.add_parser("train", help="Entraîne le réseau et teste de nouvelles poses de dépôt.")
     duration = train.add_mutually_exclusive_group()
     duration.add_argument("--matches", type=int, default=12)
     duration.add_argument("--endless", action="store_true",
                           help=f"Repart de zéro après {PROGRESS_WINDOW} matchs sans amélioration.")
     train.add_argument("--seed", type=int, default=7, help="Graine des tirages (par défaut : %(default)s).")
     train.add_argument("--resume", action="store_true", help="Repart des poids du fichier choisi.")
-    train.add_argument("--mutate-deposits", action="store_true", help="Teste des positions et des angles de dépôt.")
-    imitate = commands.add_parser("imitate", help="Apprend d’un replay annoté et valide le réseau en match autonome.")
-    imitate.add_argument("number", type=int, help="Numéro du replay de démonstration.")
     commands.add_parser("compare", help="Compare le réseau sauvegardé à l’étape 4 sur la table officielle.")
     parser.add_argument("--model", type=Path, default=MODEL)
     args = parser.parse_args()
@@ -634,43 +478,12 @@ def main():
                 parser.error("--matches doit être strictement positif.")
             incumbent = Network.load(args.model) if args.resume or args.model.exists() else None
             if args.endless:
-                _train_endless(args.seed, args.model, incumbent, resume=args.resume, mutate_deposits=args.mutate_deposits)
+                _train_endless(args.seed, args.model, incumbent, resume=args.resume)
                 return
-            if args.resume:
-                print(f"Reprise des poids de {args.model.resolve()}", flush=True)
-            network, winner, trained, explored = train_matches(args.matches, args.seed, incumbent, resume=args.resume,
-                                                                mutate_deposits=args.mutate_deposits)
+            network, replay = train_matches(args.matches, args.seed, incumbent, resume=args.resume)
             network.save(args.model)
-            print("Poids conservés" if network is incumbent else "Poids sauvegardés")
-            print(f"Mémoire · {len(network.experience)} ouvertures")
-            replays = [(f"Exploration {explored['match']}/{args.matches}", explored)]
-            if trained is not winner:
-                replays.append(("Réseau de la session", trained))
-            replays.append(("Réseau sauvegardé", winner))
-            for label, replay in replays:
-                number, _ = save_replay(replay)
-                print(f"{label} · {replay['score']} points en {replay['duree']:.2f} s · replay {number}")
-            completion_beep()
-            return
-
-        if args.command == "imitate":
-            path = _trials(REPLAY_DIR).get(args.number)
-            if path is None:
-                parser.error(f"Essai {args.number} introuvable.")
-            replay = json.loads(path.read_text(encoding="utf-8"))
-            incumbent = Network.load(args.model)
-            network, validation = _learn_replay(incumbent, replay)
-            validation.update(strategie="imitation_reseau", demonstration=args.number,
-                              score_reference=replay["score"], duree_reference=replay["duree"])
-            number, _ = save_replay(validation)
-            if network is not incumbent:
-                network.save(args.model)
-            else:
-                print(f"Poids existants conservés dans {args.model}")
-            print(f"Replay {args.number} · {replay['score']} points en {replay['duree']:.2f} s")
-            print(f"Réseau autonome · {validation['score']} points en {validation['duree']:.2f} s "
-                  f"(+{validation['score_retour']} au retour)")
-            print(f"python -B -m src.match replay {number}", flush=True)
+            number, _ = save_replay(replay)
+            print(f"Session · {replay['score']} points en {replay['duree']:.2f} s · replay {number}", flush=True)
             completion_beep()
             return
 
@@ -679,12 +492,9 @@ def main():
         replay = play_match(Simulation(), policy=MatchPolicy(network))
         score = replay["score"]
         replay.update(strategie="reseau", score_reference=reference["score"])
-        number, path = save_replay(replay)
-        print(f"Table officielle · étape 4 {reference['score']} points · réseau {score} points "
-              f"(+{replay['score_retour']} au retour)")
-        print(f"Durées simulées · étape 4 {reference['duree']:.2f} s · réseau {replay['duree']:.2f} s")
-        print(f"Replay de l’essai {number} · {path}")
-        print(f"python -B -m src.match replay {number}", flush=True)
+        number, _ = save_replay(replay)
+        print(f"Réseau {score} points en {replay['duree']:.2f} s · "
+              f"référence {reference['score']} points en {reference['duree']:.2f} s · replay {number}", flush=True)
         completion_beep()
     except (OSError, ValueError, KeyError) as error:
         parser.exit(1, f"{error}\n")

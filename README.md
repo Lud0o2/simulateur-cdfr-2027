@@ -25,13 +25,14 @@ Depuis la racine du dépôt, installe les dépendances Python. Pour le pilotage 
 python -m pip install -r requirements.txt
 ```
 
-**Ouvrir le replay de référence de l’étape 5**
+**Jouer un match de référence, puis ouvrir son replay**
 
 ```powershell
-python -B -m src.match replay 49
+python -B -m src.match
+python -B -m src.match replay
 ```
 
-Omet le numéro pour ouvrir le dernier replay enregistré.
+Indique un numéro après `replay` pour ouvrir un essai précis.
 
 **Reprendre les poids sauvegardés et jouer 100 matchs d’entraînement**
 
@@ -41,10 +42,16 @@ python -B -m src.reseau train --resume --matches 100
 
 Pour entraîner un nouveau réseau dans un fichier distinct, choisis un nom de fichier encore libre avec `python -B -m src.reseau --model reseau-nouveau.npz train`.
 
-**Tester aussi des positions et des angles de dépôt**
+**Comparer le réseau sauvegardé à la stratégie de référence**
 
 ```powershell
-python -B -m src.reseau train --resume --matches 100 --mutate-deposits
+python -B -m src.reseau compare
+```
+
+**Entraîner en continu**
+
+```powershell
+python -B -m src.reseau train --endless
 ```
 
 ## Lancer le simulateur
@@ -77,11 +84,10 @@ La physique tourne à pas fixe avec Pymunk. Les coefficients de frottement, l’
 
 ```powershell
 python -B -m src.match
-python -B -m src.match compare
-python -B -m src.match replay 1
+python -B -m src.match replay
 ```
 
-La première commande joue la stratégie de référence sans ouvrir de fenêtre, avec un maximum de 100 secondes simulées. `compare` joue la référence et la stratégie multi-piles sur la même table, affiche leurs scores et enregistre le replay de la stratégie multi-piles. `replay` lit le dernier essai ou le numéro indiqué.
+La première commande joue la stratégie de référence sans ouvrir de fenêtre, avec un maximum de 100 secondes simulées. `replay` lit le dernier essai ou le numéro indiqué.
 
 Pour une prise automatique, la ventouse s’aligne à **25 mm** d’un grand côté. Le robot avance ensuite en ligne droite sur **50 mm maximum**, saisit la pile à portée de la ventouse et poursuit tant que le châssis et les piles tenues ont la place. En multi-piles, le robot peut orienter le châssis en roulant si le trajet laisse assez de place pour la rotation.
 
@@ -151,11 +157,11 @@ Les tests avancent le même moteur qu’utilise la fenêtre. Ils vérifient le d
 - Jouer au plus 100 secondes simulées avec la physique du mode manuel. Le fichier de chaque essai conserve le score, la durée et les poses affichées par le replay.
 - **Validation.** Lancer deux fois le même scénario, comparer les poses, le score et la durée finale, puis ouvrir chaque essai par son numéro. Le chronométrage affiché permet de mesurer la cadence sans fenêtre.
 
-Le 14 novembre 2026, l’essai 1 a terminé à **43 points** avec le robot du dépôt, pour **5,12 s** de calcul sans fenêtre. Deux simulations ont produit les mêmes poses enregistrées, et la lecture Tkinter a été vérifiée. Les prises sont centrées et les détours se limitent à un point de passage par trajet. [Replay de l’essai 1](replays/essai-0001.json)
+Le 14 novembre 2026, l’essai 1 a terminé à **43 points** avec le robot du dépôt, pour **5,12 s** de calcul sans fenêtre. Deux simulations ont produit les mêmes poses enregistrées, et la lecture Tkinter a été vérifiée. Les prises sont centrées et les détours se limitent à un point de passage par trajet.
 
 ### 5. Actions indépendantes, stratégie multi-piles et entraînement
 
-**Validée le 14 novembre 2026.** Avec les poids de `reseau.npz`, le Robotronik à quatre ventouses reproduit **50 points en 19,96 s simulées**, dont **10 points au retour**, sur la table officielle sans adversaire. [Replay de référence](replays/essai-0049.json)
+**Validée le 14 novembre 2026.** Les poids utilisés lors de la validation ont donné **50 points en 19,96 s simulées**, dont **10 points au retour**, avec le Robotronik à quatre ventouses sur la table officielle sans adversaire.
 
 #### Prise et dépôt
 
@@ -186,31 +192,21 @@ Le réseau **97 → 16 → 8 → 1** a **1 713 paramètres**. Il reçoit l’ét
 
 L’entraînement alterne la stratégie multi-piles, l’exploration et les décisions du réseau. Chaque match démarre avec les dix piles centrées sur leurs zones de stockage, aux emplacements du plan G.1. La graine fait varier les décisions explorées. Le réseau classe jusqu’à huit prises et tous les dépôts proposés, avec les deux sens d’approche de chaque rempart. Dès la première prise, il peut arrêter de charger et commencer à déposer. À vide, il peut choisir de rentrer et de terminer. Pour chaque décision, il apprend les points marqués d’ici la fin du match, retour compris. Les points tardifs ont le même poids que les points immédiats. Finir plus vite ajoute au plus l’équivalent d’un demi-point aux cibles d’apprentissage. [Règlement Eurobot 2027, plan G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
 
-```powershell
-python -B -m src.reseau compare
-```
-
 `train --resume` repart des poids de `reseau.npz`. Lors des matchs guidés en reprise, le réseau explore une autre action dans 30 % des décisions, parmi les choix du deuxième au cinquième rang. Quand le robot est chargé, une place est réservée à la prise la plus rapide vers une autre pile. Le taux d’apprentissage est de 0,005 en reprise et de 0,01 avec une nouvelle initialisation.
 
 Un match d’entraînement sur huit choisit ses actions au hasard parmi toutes les prises accessibles et tous les dépôts proposés. Il poursuit la construction tant qu’une prise reste accessible à vide. Pour chaque ouverture, définie par les deux premières piles prises, l’entraînement conserve les décisions et les récompenses du meilleur match qui a marqué des points de construction. Les candidats réutilisent aussi des exemples tirés de cette mémoire. En fin d’entraînement à durée fixe, `reseau.npz` conserve cette mémoire et le nombre de matchs joués, même quand le meilleur réseau reste le même. Avec `--resume`, les tirages et la fréquence des matchs aléatoires tiennent compte des sessions précédentes.
 
-Avec `--mutate-deposits`, chaque candidat modifie la position ou l’angle d’un seul dépôt. Le centre de la pile peut se trouver jusqu’à 200 mm du centre du rempart. Les angles suivent les pas de 10° de l’étape 6. Le simulateur vérifie le trajet, les collisions et la zone. Un match autonome valide chaque mutation. Seule une amélioration du score, ou du temps à score égal, permet de conserver la mutation. Le fichier `reseau.npz` contient les poids et les poses retenues, avec `drop_offsets` pour les décalages en millimètres et `drop_angles` pour les rotations en radians. En match multi-piles, les anciens angles sont ramenés au pas le plus proche. Un ancien fichier sans `drop_angles` retrouve une pose alignée sur chaque rempart.
+Pour chaque match d’entraînement, un candidat supplémentaire modifie la position ou l’angle de la pose enregistrée d’un rempart. Le centre de la pile peut se trouver jusqu’à 200 mm du centre du rempart. Les angles suivent les pas de 10° de l’étape 6. Un match autonome évalue chaque mutation avec les mêmes contrôles de trajet, de collisions et de zone. Seule une amélioration du score, ou du temps à score égal, permet de conserver la mutation. Le fichier `reseau.npz` contient les poids et les poses retenues, avec `drop_offsets` pour les décalages en millimètres et `drop_angles` pour les rotations en radians. En match multi-piles, les anciens angles sont ramenés au pas le plus proche. Un ancien fichier sans `drop_angles` retrouve une pose alignée sur chaque rempart.
 
 L’entraînement choisit automatiquement le nombre de processus selon les cœurs logiques disponibles et la taille des lots. Les matchs d’une génération partent du meilleur réseau validé jusque-là. Un candidat privilégie la meilleure trajectoire explorée du lot et les autres apprennent sur l’historique des matchs. Les candidats jouent chacun un match de validation sans exploration sur la table officielle, en parallèle. Le score prime, puis le temps simulé le plus court à score égal. À égalité complète, le meilleur réseau déjà validé garde sa place. Le gagnant sert de point de départ à la génération suivante.
 
-Avec `--matches`, le journal affiche le score, la durée simulée et le nombre de décisions de chaque match exploré, y compris le choix de rentrer. À la fin de chaque génération, il affiche le meilleur résultat sans exploration et le record avec exploration.
-
-L’indicateur de progression revient à **100 %** lorsque le réseau autonome marque davantage de points ou termine plus vite à score égal. Il descend jusqu’à **0 %** quand le nombre de matchs sans nouveau record autonome atteint `PROGRESS_WINDOW`, le seuil défini dans `src/reseau.py`. Le compteur est sauvegardé dans `reseau.npz` et repris avec `--resume`. Il démarre à zéro pour les anciens fichiers de poids. Un record en exploration apparaît séparément dans le journal.
+En fin de session, `train` affiche le meilleur résultat autonome et sauvegarde son replay. Si le modèle déjà sur disque obtient un meilleur résultat, ses poids sont conservés. Ouvre le replay de la session avec `python -B -m src.match replay` ou son numéro.
 
 #### Entraînement en boucle
 
-```powershell
-python -B -m src.reseau train --endless
-```
+Le mode `--endless` démarre avec des poids aléatoires. Avec `--resume`, seule la première série repart du fichier de poids. Quand le nombre de matchs sans améliorer le record autonome de la série atteint `PROGRESS_WINDOW`, le programme change de graine et recrée un réseau avec des poids aléatoires, une mémoire vide et les poses de dépôt par défaut. `python -B -m src.reseau train --help` indique le seuil actuel.
 
-Le mode `--endless` démarre avec des poids aléatoires. Avec `--resume`, seule la première série repart du fichier de poids. Quand le nombre de matchs sans améliorer le record autonome de la série atteint `PROGRESS_WINDOW`, le programme sauvegarde le replay de ce record, change de graine et recrée un réseau avec des poids aléatoires, une mémoire vide et les poses de dépôt par défaut. `python -B -m src.reseau train --help` indique le seuil actuel.
-
-Le terminal affiche les records et les réinitialisations. Les fichiers de replay incluent le numéro, le score et le temps simulé, au format `essai-0042-53pts-42.19s.json`. La commande `python -B -m src.match replay NUMERO` ouvre le replay avec ce numéro. `reseau.npz` conserve le meilleur réseau validé sur la table officielle, même quand la série active repart de zéro. `Ctrl+C` arrête l’entraînement.
+`reseau.npz` est mis à jour à chaque amélioration du meilleur réseau sauvegardé. `Ctrl+C` termine la session, affiche son meilleur résultat autonome toutes séries confondues et sauvegarde son replay, au format `essai-0042-53pts-42.19s.json`.
 
 Le 14 novembre 2026, un essai de **24 matchs d’entraînement** avec la graine 8 a pris **17,9 s** sur 8 processus, dont **11,9 s** pour les matchs d’entraînement. La validation finale a joué 6 matchs, contre 75 avec la validation après chaque mise à jour. Les poids d’origine ont été conservés lors de cet essai.
 
@@ -218,19 +214,15 @@ Le 14 novembre 2026, la réutilisation des poses et des zones de score a ramené
 
 Sans `--seed`, l’entraînement utilise la graine `7`. Passe `--seed` avec un autre entier pour changer la suite des tirages. La graine utilisée figure dans le replay.
 
-À la fin d’un entraînement à durée fixe, `train` sauvegarde le meilleur match avec exploration et le meilleur match autonome de la session. Si un réseau déjà sur disque conserve la première place, son match est aussi sauvegardé et affiché sous « Réseau sauvegardé ». Le résumé affiche les numéros des replays. Le dernier replay correspond au réseau dans `reseau.npz`.
-
-Le 14 novembre 2026, une reprise de 24 matchs avec mutations et validations sur huit processus a pris **19,91 s au lieu de 37,02 s**, à poids de départ et graines identiques. Le moteur réutilise les contours des piles tant que leur pose reste la même et écarte les détours dont la durée minimale dépasse la meilleure route connue. L’entraînement enregistre les décisions puis calcule les images en rejouant le seul match avec exploration retenu. Les replays sauvegardés et le modèle final étaient identiques dans cet essai.
+Le 14 novembre 2026, une reprise de 24 matchs avec mutations et validations sur huit processus a pris **19,91 s au lieu de 37,02 s**, à poids de départ et graines identiques. Les replays sauvegardés et le modèle final étaient identiques dans cet essai.
 
 `compare` recharge les poids, joue le réseau sans exploration et la référence de l’étape 4 sur la même table officielle, affiche leurs scores et leurs durées, puis garde le replay du réseau. L’option `--model` avant la sous-commande choisit le fichier de poids.
-
-La commande `python -B -m src.reseau imitate NUMERO` reprend les poids sauvegardés et apprend d’un replay annoté qui utilise la configuration actuelle du robot. Le replay contient les listes `prises` et `depots`, ainsi que `tournees` pour indiquer le nombre de piles chargées à chaque tournée lorsqu’il y en a plusieurs. La démonstration reprend les décalages et rotations du replay s’il contient `decalages_depot_mm` et `rotations_depot_rad`. L’entraînement rejoue les actions et vérifie que les scores de construction et de retour sont reproduits. La durée peut varier avec les trajets recalculés. La validation lance ensuite un match où le réseau choisit seul. La commande garde le replay de ce match et remplace les poids si le résultat valide progresse en score, puis en durée à score égal.
 
 ### 6. Plusieurs dépôts par zone
 
 **À valider.**
 
-- Chaque rempart propose sept emplacements. Le centre, les deux décalages latéraux de 120 mm, les deux décalages longitudinaux de 200 mm et les deux décalages diagonaux de 200 mm sont testés de −90° à +90° par pas de 10°, par rapport à la longueur du rempart. Les deux angles perpendiculaires ont la même empreinte et correspondent aux deux sens d’approche. Le réseau peut aussi choisir la pose retenue par mutation pour ce rempart.
+- Chaque rempart propose quatre emplacements standard. Le centre, les deux décalages latéraux de 120 mm et un décalage diagonal de 200 mm (−120 mm dans la longueur et −160 mm dans la largeur) sont échantillonnés de −90° à +80° par pas de 10°. Pour chaque rempart, le réseau peut aussi choisir la pose sauvegardée par l’entraînement, y compris hors grille.
 - Le simulateur écarte les emplacements occupés ou hors rempart avant de chercher un trajet, puis vérifie l’approche avec tout le chargement. Le robot peut continuer à prendre des piles lorsque chaque rempart contient déjà une pile.
 - Une pile supplémentaire dans le même rempart ajoute **3 points**. Le bonus de **5 points** du rempart est compté une seule fois.
 
@@ -238,9 +230,7 @@ Le 14 novembre 2026, trois matchs avec les poids de reprise (un autonome, puis d
 
 Le 14 novembre 2026, la stratégie multi-piles a marqué **62 points en 55,08 s** avec les nouveaux points de passage et la marge de 5 mm. Elle a déposé neuf piles et est rentrée entièrement dans la salle du trône. Le replay 64 avait donné le même score en 56,90 s. Sur la prise de la pile 4, le trajet est passé de 3,18 m à 0,98 m entre les deux essais.
 
-```powershell
-python -B -m src.match replay 65
-```
+Le 15 novembre 2026, la réutilisation des contours tournés, le filtrage des remparts éloignés et la préparation des entrées communes ont ramené de **8,42 s à 6,52 s** le total des temps processeur médians sur trois scénarios (autonome et exploration avec les graines 7 et 19). Les replays et les décisions concordaient à poids et grille identiques. Avec la grille réduite de **630 à 360 poses standard**, le réseau de cet essai a marqué **59 points en 51,72 s simulées** sur la table officielle, contre **59 points en 51,15 s** avec sept positions par rempart.
 
 ### 7. Construction des murs et des portes
 
