@@ -11,15 +11,16 @@ import numpy as np
 from pymunk import Vec2d
 
 from src.match import (
-    ALIGNED_ANGLES, ALTERNATE_DROPS, CENTERED_DROPS, MATCH_SECONDS, ROUTE_MARGIN, Replay, _action_state, _approach, _clear,
-    _drop_approach, _follow, _pickup_approach, _route, place_pile, play_match, save_replay, take_pile,
+    ALIGNED_ANGLES, ALTERNATE_DROPS, CENTERED_DROPS, MATCH_SECONDS, ROUTE_MARGIN, Approach, Pickup, Replay,
+    _action_state, _approach, _clear, _collection_actions, _collection_choices, _drop_approach, _follow, _paired_cups,
+    _pickup_approach, _return_home, _route, place_pile, play_collection, play_match, save_replay, take_pile,
 )
 from src.reseau import (
     ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, EXPLORATION_INTERVAL, LAYERS, PROGRESS_WINDOW, TABLE_DIAGONAL,
     MatchPolicy, Network, _mutate_drop_pose, _replay_rank, features, train_matches,
 )
 from src.simulateur import (
-    START, START_BLOCKS, TOWER_CENTERS, TURN_STEP, RobotGeometry, Simulation, load_robot,
+    START, START_BLOCKS, THRONE_ROOM, TOWER_CENTERS, TURN_STEP, RobotGeometry, Simulation, load_robot,
     rectangle_corners, scoring_zones, travel_time,
 )
 
@@ -949,6 +950,70 @@ class SimulationTest(unittest.TestCase):
 
 
 class AutomaticMatchTest(unittest.TestCase):
+    def test_unload_requires_a_stop_with_the_whole_robot_in_the_start_zone(self):
+        simulation = Simulation(blocks=START_BLOCKS[:1])
+        self.assertTrue(take_pile(simulation, 0, 1))
+        self.assertEqual(simulation.unload_at_start(), 0)
+        _return_home(simulation, lambda _label: None, complete_only=True)
+        self.assertEqual(simulation.return_score, 10)
+        simulation.move_to(THRONE_ROOM[2], START[1])
+        self.assertTrue(simulation.moving)
+        self.assertEqual(simulation.unload_at_start(), 0)
+        simulation.advance(3)
+        self.assertEqual(simulation.return_score, 5)
+        self.assertEqual(simulation.unload_at_start(), 0)
+        _return_home(simulation, lambda _label: None, complete_only=True)
+        self.assertEqual(simulation.unload_at_start(), 1)
+        self.assertEqual(simulation.blocks, ())
+        self.assertIsNone(simulation.held_pile(1))
+        simulation.reset()
+        self.assertEqual(len(simulation.blocks), 1)
+
+    def test_collection_delivers_all_ten_piles_and_replays_each_unload(self):
+        data = play_collection(Simulation())
+        replay = Replay(data)
+        self.assertEqual(len(replay.frame["piles"]), 10)
+        self.assertEqual(data["score"], data["total_piles"])
+        self.assertLess(replay.duration, MATCH_SECONDS)
+        self.assertEqual([later["score"] - earlier["score"] for earlier, later in zip(replay.frames, replay.frames[1:])
+                          if later["score"] > earlier["score"]], [6, 4])
+        self.assertAlmostEqual(data["distance_mm"], sum(dist(a["position"], b["position"])
+                                                        for a, b in zip(replay.frames, replay.frames[1:])))
+        replay.time = replay.duration
+        self.assertEqual(replay.frame["piles"], [])
+        self.assertEqual(replay.frame["score"], 10)
+
+    def test_collection_shortlist_excludes_carried_stocks_and_only_keeps_three(self):
+        simulation = Simulation()
+        end = Vec2d(*simulation.position)
+        pickup = Pickup(Approach(0, (end,), 0, ()), end)
+        nearest = sorted(range(len(simulation.blocks)),
+                         key=lambda index: dist(end, simulation.blocks[index].position))
+        with patch("src.match._pickup_options", return_value=(pickup,)):
+            choices = _collection_choices(simulation, (1, 2), {1: nearest[0]}, nearest=3)
+        self.assertEqual({choice[2] for choice in choices}, set(nearest[1:4]))
+        self.assertEqual({choice[3] for choice in choices}, {2})
+
+    def test_collection_pairs_respect_both_pickup_orders_and_their_sides(self):
+        simulation = Simulation(blocks=START_BLOCKS[:2])
+        end = Vec2d(*simulation.position)
+        paired = _paired_cups(simulation.geometry)
+        for left, right, left_pile, heading in ((1, 4, 0, -pi / 2), (5, 6, 1, pi / 2)):
+            with self.subTest(cups=(left, right)):
+                right_pile = 1 - left_pile
+                turn = heading - simulation.heading
+                pickup = Pickup(Approach(0, (end,), turn, ()), end)
+                reversed_pickup = Pickup(Approach(0, (end,), turn + pi, ()), end)
+                choices = [(0, 0, index, cup, pickup) for index in (left_pile, right_pile) for cup in (left, right)]
+                with patch("src.match._collection_choices", return_value=choices):
+                    actions = _collection_actions(simulation, (left, right), {}, paired, None)
+                self.assertEqual([(choice[2:4], pair[:2]) for choice, pair in actions],
+                                 [((left_pile, left), (right_pile, right)), ((right_pile, right), (left_pile, left))])
+                opposite = (0, 0, right_pile, right, reversed_pickup)
+                with patch("src.match._collection_choices", return_value=[*choices, opposite]):
+                    self.assertEqual(_collection_actions(simulation, (left, right), {left: left_pile},
+                                                         paired, actions[0][1]), [(choices[3], None)])
+
     def test_planned_rolling_turn_uses_the_clearance_in_the_requested_direction(self):
         for edge in (0, 100):
             with self.subTest(edge=edge):
@@ -1205,14 +1270,17 @@ class AutomaticMatchTest(unittest.TestCase):
 
 
 class RobotConfigurationTest(unittest.TestCase):
-    def test_default_equilateral_robot_has_two_front_and_two_side_cups(self):
+    def test_default_equilateral_robot_has_six_cups(self):
         robot = load_robot()
         a, b, c = robot.contour
-        self.assertTrue(all(abs(dist(p, q) - SIDE) < 1e-6 for p, q in ((a, b), (b, c), (c, a))))
-        self.assertEqual(len(robot.mounts), 4)
-        for (mount, facing), y, angle in zip(robot.mounts, (-100, 105, -105, 100), (0, 120, -120, 0), strict=True):
+        self.assertTrue(all(abs(dist(p, q) - 410) < 1e-6 for p, q in ((a, b), (b, c), (c, a))))
+        self.assertEqual(len(robot.mounts), 6)
+        for (mount, facing), y, angle in zip(robot.mounts, (-100, 125, -125, 100, -30, 30),
+                                             (0, 120, -120, 0, 180, 180), strict=True):
             self.assertEqual(mount[1], y)
             self.assertAlmostEqual(facing.get_distance(Vec2d(1, 0).rotated(radians(angle))), 0)
+        self.assertEqual(robot.mounts[4][0][0], a[0])
+        self.assertEqual(robot.mounts[5][0][0], a[0])
 
     def test_custom_rectangle_and_cup_drive_collisions_and_grip(self):
         config = """

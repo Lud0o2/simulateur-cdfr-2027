@@ -2,12 +2,13 @@
 
 import argparse
 from bisect import bisect_right
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from heapq import heappop, heappush
 from itertools import count, pairwise
 import json
-from math import atan2, ceil, copysign, floor, hypot, pi, radians, remainder
+from math import atan2, ceil, cos, copysign, dist, floor, hypot, pi, radians, remainder
 import os
 from pathlib import Path
 import re
@@ -428,7 +429,7 @@ def _stroke_end(start, delta, footprints, obstacles):
     return start + delta * fraction
 
 
-def _pickup_approach(simulation, block, cup, state):
+def _pickup_options(simulation, block, cup, state):
     mount, facing = simulation.geometry.mounts[cup - 1]
     start, footprints, obstacles = state
     center = Vec2d(*block.position)
@@ -444,7 +445,6 @@ def _pickup_approach(simulation, block, cup, state):
         # Garde 10 mm entre deux piles identiques prises sur la même face.
         offset = copysign(max(0, half_length + 5 - abs(gap) / 2), -gap)
     pickup = Vec2d(*mount) + tangent * offset
-    choices = []
     for side in (-1, 1):
         normal = Vec2d(0, side).rotated(block.angle)
         half_width = max((Vec2d(*corner) - center).dot(normal) for corner in block.corners)
@@ -464,8 +464,11 @@ def _pickup_approach(simulation, block, cup, state):
             end = standoff - normal * PICKUP_STROKE
             held = tuple(Vec2d(*corner) - contact for corner in block.corners)
             others = tuple(obstacle for obstacle in obstacles if obstacle[0] != block.corners)
-            choices.append(Pickup(approach, _stroke_end(contact, end - contact, (*rotated, held), others)))
-    return min(choices, key=lambda option: option.duration, default=None)
+            yield Pickup(approach, _stroke_end(contact, end - contact, (*rotated, held), others))
+
+
+def _pickup_approach(simulation, block, cup, state):
+    return min(_pickup_options(simulation, block, cup, state), key=lambda option: option.duration, default=None)
 
 
 def _wall_drop_zones(block: Block):
@@ -613,7 +616,7 @@ def choose_plan(simulation: Simulation, unavailable: set[int]) -> Plan | None:
     return best
 
 
-def _frame(simulation, label):
+def _frame(simulation, label, *, score=None):
     def point(coords):
         return [round(value, 3) for value in coords]
 
@@ -628,7 +631,7 @@ def _frame(simulation, label):
         "cups": [[point(cup.position), cup.enabled] for cup in simulation.suction_cups],
         "target": point(movement.end) if simulation.moving and not movement.turn else None,
         "blocked": bool(movement and (movement.blocked or movement.rotation_blocked)),
-        "score": simulation.score_for_blocks(blocks),
+        "score": simulation.score_for_blocks(blocks) if score is None else score,
         "action": label,
     }
 
@@ -750,7 +753,7 @@ def _play_batches(simulation, record, policy, drop_poses):
                 return
 
 
-def _return_home(simulation, record):
+def _return_home(simulation, record, *, complete_only=False, shortest=False):
     deadline = MATCH_SECONDS - FRAME_STEP  # Une arrivée au buzzer doit déjà être à l'arrêt.
     if simulation.time >= deadline:
         return
@@ -780,21 +783,192 @@ def _return_home(simulation, record):
         simulation.advance(seconds)
         record("Retour à la salle du trône")
 
-    for score in (10, 5):
+    for score in ((10,) if complete_only else (10, 5)):
         best = None
+        best_cost = float("inf")
         for target, turn in targets[score]:
-            direct = _segment_time(start, target)
-            if best is not None and direct >= best.duration:
+            lower_bound = start.get_distance(target) if shortest else _segment_time(start, target)
+            if lower_bound >= best_cost:
                 continue
             route = _approach(start, target, turn, footprints, obstacles)
-            if (route is not None and simulation.time + route.duration <= deadline
-                    and (best is None or route.duration < best.duration)):
-                best = route
+            if route is None or simulation.time + route.duration > deadline:
+                continue
+            cost = route.distance_from(start) if shortest else route.duration
+            if cost < best_cost:
+                best, best_cost = route, cost
         if best is not None:
             if (_follow(simulation, best, advance=advance, deadline=deadline)
                     and current == 0 and simulation.return_score == 5):
-                _return_home(simulation, record)
+                _return_home(simulation, record, complete_only=complete_only, shortest=shortest)
             return
+
+
+def _collection_choices(simulation, cups, held, *, nearest=None):
+    state = _action_state(simulation)
+    start = state[0]
+    carried = set(held.values())
+    stocks = [(index, block) for index, block in enumerate(simulation.blocks) if index not in carried]
+    if nearest is not None:
+        stocks = sorted(stocks, key=lambda stock: dist(start, stock[1].position))[:nearest]
+    available = tuple(cup for cup in cups if cup not in held)
+    choices = []
+    for index, block in stocks:
+        for cup in available:
+            for pickup in _pickup_options(simulation, block, cup, state):
+                choices.append((pickup.distance_from(start), pickup.duration, index, cup, pickup))
+    choices.sort(key=lambda choice: choice[:2])
+    return choices
+
+
+def _paired_cups(geometry):
+    paired = {}
+    for direction in (1, -1):
+        face = sorted((mount[1], cup) for cup, (mount, facing) in enumerate(geometry.mounts, 1)
+                      if facing.x * direction > 1 - CONTACT_GAP)
+        if len(face) == 2:
+            (_, left), (_, right) = face
+            paired[left] = right, 1
+            paired[right] = left, -1
+    return paired
+
+
+def _collection_actions(simulation, cups, held, paired, pair):
+    choices = _collection_choices(simulation, cups, held, nearest=3)
+    if pair is not None:
+        pile, cup, heading = pair
+        return [(choice, None) for choice in choices if choice[2:4] == (pile, cup)
+                and cos(simulation.heading + choice[4].approach.turn - heading) > 0]
+
+    blocks = simulation.blocks
+    carried = set(held.values())
+    actions = []
+    for choice in choices:
+        _, _, index, cup, pickup = choice
+        if cup not in paired:
+            actions.append((choice, None))
+            continue
+        other_cup, sign = paired[cup]
+        if other_cup in held:
+            continue
+        block = blocks[index]
+        heading = simulation.heading + pickup.approach.turn
+        for other, neighbor in enumerate(blocks):
+            if other == index or other in carried:
+                continue
+            offset = (Vec2d(*neighbor.position) - block.position).rotated(-heading)
+            lateral = sign * offset.y
+            # Les centres voisins sont espacés de 500 mm sur les rangées officielles.
+            if (0 < lateral <= 550 and abs(offset.x) <= 55
+                    and abs(remainder(neighbor.angle - block.angle, pi)) <= radians(10)):
+                actions.append((choice, (other, other_cup, heading)))
+    return actions
+
+
+def _collection_trip(simulation, cups, load):
+    best = None
+    best_distance = float("inf")
+    # shortcut: borne les essais de prise par tournée, à relever si les chargements restent bloqués.
+    attempts = 48
+
+    def search(state, picks, distance):
+        nonlocal best, best_distance, attempts
+        if distance >= best_distance:
+            return
+        held = {cup: index for cup in cups if (index := state.held_pile(cup)) is not None}
+        if len(held) == load:
+            position = state.position
+
+            def record_return(_label):
+                nonlocal position, distance
+                distance += dist(position, state.position)
+                position = state.position
+
+            _return_home(state, record_return, complete_only=True, shortest=True)
+            if state.return_score == 10 and round(state.time, 6) < MATCH_SECONDS and distance < best_distance:
+                best, best_distance = picks, distance
+            return
+
+        if attempts == 0:
+            return
+        for _, _, index, cup, pickup in _collection_choices(state, cups, held):
+            if attempts == 0:
+                break
+            attempts -= 1
+            candidate = deepcopy(state)
+            travelled = 0.0
+
+            def advance(seconds):
+                nonlocal travelled
+                position = candidate.position
+                candidate.advance(seconds)
+                travelled += dist(position, candidate.position)
+
+            if _take_pickup(candidate, index, cup, pickup, advance=advance, deadline=MATCH_SECONDS):
+                search(candidate, (*picks, (index, cup, pickup)), distance + travelled)
+
+    search(deepcopy(simulation), (), 0.0)
+    return best
+
+
+def play_collection(simulation: Simulation, *, policy=None, record_frames=True):
+    """Charge les ventouses disponibles et ramène les piles au départ."""
+    total = len(simulation.blocks)
+    cups = range(1, len(simulation.geometry.mounts) + 1)
+    paired = _paired_cups(simulation.geometry)
+    delivered = 0
+    frames = []
+
+    def record(label):
+        if not record_frames:
+            return
+        frame = _frame(simulation, label, score=delivered)
+        frame["t"] = min(frame["t"], MATCH_SECONDS)
+        if frames and frames[-1]["t"] == frame["t"]:
+            frames[-1] = frame
+        else:
+            frames.append(frame)
+
+    record("Départ")
+    while delivered < total and round(simulation.time, 6) < MATCH_SECONDS:
+        load = min(len(cups), total - delivered)
+        held = {}
+        pair = None
+        if policy is None:
+            plan = _collection_trip(simulation, cups, load)
+            if plan is None:
+                break
+        for step in range(load):
+            if policy is None:
+                index, cup, pickup = plan[step]
+            else:
+                actions = _collection_actions(simulation, cups, held, paired, pair)
+                if not actions:
+                    break
+                (_, _, index, cup, pickup), pair = policy(simulation, held, actions)
+
+            def advance(seconds):
+                simulation.advance(seconds)
+                record(f"Prise · ventouse {cup}")
+
+            if not _take_pickup(simulation, index, cup, pickup, advance=advance, deadline=MATCH_SECONDS):
+                break
+            held[cup] = index
+        else:
+            _return_home(simulation, record, complete_only=True, shortest=policy is None)
+            unloaded = simulation.unload_at_start() if round(simulation.time, 6) < MATCH_SECONDS else 0
+            if unloaded:
+                delivered += unloaded
+                record(f"Décharge · {delivered}/{total} piles ramenées")
+                continue
+        break
+
+    if delivered < total:
+        record(f"Fin · {delivered}/{total} piles ramenées")
+    replay = {"strategie": "opti_take", "obstacles": simulation.obstacles, "frames": frames,
+              "score": delivered, "total_piles": total, "duree": min(round(simulation.time, 6), MATCH_SECONDS)}
+    if record_frames:
+        replay["distance_mm"] = sum(dist(a["position"], b["position"]) for a, b in pairwise(frames))
+    return replay
 
 
 def play_match(simulation: Simulation, *, batches=False, policy=None, record_frames=True):
@@ -888,14 +1062,15 @@ def _play_reference(simulation, record):
 def _trials(directory: Path):
     trials = {}
     for path in directory.glob("essai-*.json"):
-        match = re.fullmatch(r"essai-([0-9]+)(?:--?[0-9]+pts-[0-9]+\.[0-9]{2}s)?", path.stem)
+        match = re.fullmatch(r"essai-([0-9]+)(?:--?[0-9]+(?:pts|piles)-[0-9]+\.[0-9]{2}s)?", path.stem)
         if match and path.is_file():
             trials[int(match[1])] = path
     return trials
 
 
 def save_replay(replay, directory: Path = REPLAY_DIR, *, descriptive=False):
-    suffix = f"-{replay['score']:d}pts-{replay['duree']:.2f}s" if descriptive else ""
+    unit = "piles" if replay.get("strategie") == "opti_take" else "pts"
+    suffix = f"-{replay['score']:d}{unit}-{replay['duree']:.2f}s" if descriptive else ""
     directory.mkdir(parents=True, exist_ok=True)
     file = NamedTemporaryFile(dir=directory, prefix=".essai-", suffix=".tmp", encoding="utf-8",
                               mode="w", delete=False)
@@ -950,6 +1125,7 @@ class Replay:
             raise ValueError("liste d’obstacles manquante ou invalide")
         self.frames = data["frames"]
         self.obstacles = obstacles
+        self.collection = data.get("strategie") == "opti_take"
         self.times = []
         for index, frame in enumerate(self.frames, 1):
             if not isinstance(frame, dict):
@@ -972,8 +1148,12 @@ class Replay:
                     and type(frame["blocked"]) is bool and type(frame["score"]) is int
                     and isinstance(frame["action"], str)):
                 raise ValueError(f"image {index} : données d’affichage invalides")
-            if index > 1 and any(len(frame[key]) != len(self.frames[0][key]) for key in ("piles", "cups")):
-                raise ValueError(f"image {index} : nombre de piles ou de ventouses incohérent")
+            if index > 1:
+                previous = self.frames[index - 2]
+                unloaded = frame["score"] - previous["score"] if self.collection else 0
+                if (unloaded < 0 or len(frame["piles"]) != len(previous["piles"]) - unloaded
+                        or len(frame["cups"]) != len(previous["cups"])):
+                    raise ValueError(f"image {index} : nombre de piles ou de ventouses incohérent")
             self.times.append(timestamp)
         self.start = self.time = self.times[0]
         self.duration = self.times[-1]
@@ -998,6 +1178,7 @@ def completion_beep():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command")
+    commands.add_parser("collecte", help="Ramène les piles au départ et enregistre le replay.")
     player = commands.add_parser("replay", help="Ouvre le dernier essai ou le numéro indiqué.")
     player.add_argument("number", nargs="?", type=int)
     args = parser.parse_args()
@@ -1015,15 +1196,18 @@ def main():
             parser.error(f"Impossible de lire l'essai {number} ({error}).")
         create_window(replay=replay, trial=number).mainloop()
     else:
+        collection = args.command == "collecte"
         try:
             start = perf_counter()
-            replay = play_match(Simulation())
+            replay = (play_collection if collection else play_match)(Simulation())
             elapsed = perf_counter() - start
-            number, _ = save_replay(replay)
+            number, _ = save_replay(replay, descriptive=collection)
         except (OSError, ValueError) as error:
             parser.exit(1, f"{error}\n")
-        print(f"Essai {number} · {replay['score']} points en {replay['duree']:.2f} s simulées "
-              f"(calcul : {elapsed:.2f} s)", flush=True)
+        result = (f"{replay['score']}/{replay['total_piles']} piles" if collection else f"{replay['score']} points")
+        distance = f" · {replay['distance_mm'] / 1000:.2f} m parcourus" if collection else ""
+        print(f"Essai {number} · {result} en {replay['duree']:.2f} s simulées "
+              f"(calcul : {elapsed:.2f} s){distance}", flush=True)
         completion_beep()
 
 

@@ -63,7 +63,9 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
 
     scoreboard = tk.Frame(header, bg=surface, padx=12, pady=5)
     scoreboard.pack(side="right")
-    tk.Label(scoreboard, text="Score jaune", bg=surface, fg=muted, font=(font, 9)).pack(side="left")
+    collection = replay is not None and replay.collection
+    score_label = "Piles ramenées" if collection else "Score jaune"
+    tk.Label(scoreboard, text=score_label, bg=surface, fg=muted, font=(font, 9)).pack(side="left")
     score = tk.Label(scoreboard, bg=surface, fg=yellow, font=(font, 19, "bold"), width=3)
     score.pack(side="left", padx=(8, 0))
 
@@ -93,7 +95,7 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     ]
     block_items = [
         canvas.create_polygon(0, 0, 0, 0, 0, 0, 0, 0, fill="#c99d68", outline="#553b24", width=2)
-        for _ in (simulation.blocks if replay is None else replay.frame["piles"])
+        for _ in (simulation.blocks if replay is None else replay.frames[0]["piles"])
     ]
     path = canvas.create_line(0, 0, 0, 0, fill=accent, width=2, dash=(4, 5), state="hidden")
     cups_at_start = simulation.suction_cups if replay is None else replay.frame["cups"]
@@ -142,6 +144,11 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         score.configure(text=str(points))
         for item, corners in zip(block_items, piles):
             canvas.coords(item, *(border + value * scale for corner in corners for value in corner))
+            if collection:
+                canvas.itemconfigure(item, state="normal")
+        if collection:
+            for item in block_items[len(piles):]:
+                canvas.itemconfigure(item, state="hidden")
         x, y = position
         screen_x, screen_y = border + scale * x, border + scale * y
         vertices = [(screen_x + scale * dx, screen_y + scale * dy) for dx, dy in footprint]

@@ -2,6 +2,12 @@
 
 Le simulateur compare des stratégies de match et entraîne un réseau de neurones sur la table officielle, sans adversaire. Le réseau choisit les prises, les dépôts et le retour à la salle du trône.
 
+## Point de reprise depuis `main`
+
+- `codex/opti-take-main` repart du commit `55d5e1a` de `main`. La base fournit le pilotage manuel du robot holonome, la physique des piles, quatre ventouses, la planification A*, les actions de prise et de dépose, les matchs de construction et leur replay. Les 73 tests de cette base passent.
+- Le dossier local contient les poids de construction `reseau.npz`, lus avec un compteur de 34 matchs.
+- Le 15 novembre 2026, la collecte avec chargement complet a ramené les dix piles en **35,17 s** et **13,62 m** parcourus, en décharges de quatre, quatre et deux piles (replay local `3`). La collecte précédente avait parcouru **14,57 m** en **34,50 s** (replay `2`).
+
 ## Feuille de route
 
 | Étape | Statut |
@@ -33,6 +39,31 @@ python -B -m src.match replay
 ```
 
 Indique un numéro après `replay` pour ouvrir un essai précis.
+
+**Jouer un match de collecte**
+
+```powershell
+python -B -m src.match collecte
+python -B -m src.match replay
+```
+
+Le robot revient avec toutes ses ventouses chargées, sauf à la dernière tournée où il ramène toutes les piles restantes. Pour chaque tournée, il simule plusieurs enchaînements et choisit le plus court parmi ceux qui permettent de charger et de rentrer. La distance mesure le déplacement du centre du robot, aller et retour compris. À l’arrêt et entièrement dans la zone de départ, il vide toutes ses ventouses et repart. Seules les piles ramenées avant 100 s comptent. Le chrono s’arrête à la dernière décharge quand toutes les piles ont été ramenées. La zone de départ et les stocks reprennent le terrain officiel (§ D.3, D.4 et plan G.1). [Règlement Eurobot 2027](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
+
+**Entraîner et jouer le réseau de collecte**
+
+```powershell
+python -B -m src.reseau collecte --matches 100
+python -B -m src.reseau collecte --jouer
+python -B -m src.match replay
+```
+
+À chaque prise, le réseau choisit parmi les trois piles libres dont les centres sont les plus proches à vol d’oiseau. La planification vérifie ensuite les trajets de prise. À l’avant comme à l’arrière, les deux ventouses d’une paire prennent deux piles voisines sur la même rangée. La ventouse gauche prend celle du côté gauche du châssis et la droite celle du côté droit. Les deux prises se suivent, dans l’ordre choisi par le réseau. Les ventouses latérales peuvent prendre une pile chacune. Le retour se fait à pleine charge ou avec toutes les piles restantes.
+
+Le réseau **11 → 8 → 1** classe les prises par trajet A*, durée, rotation, proximité du départ et d’une autre pile, ventouse, chargement, stock restant, temps restant et engagement d’une paire. L’entraînement conserve les deux meilleurs réseaux et teste de nouveaux réseaux aléatoires et des mutations. Il maximise le nombre de piles ramenées, puis minimise le temps jusqu’à la dernière décharge. Le fichier local `reseau-collecte.npz` contient les meilleurs poids. Ajoute `--resume` pour repartir de ces poids.
+
+Chaque lancement de l’entraînement de collecte tire une graine aléatoire et l’affiche. Ajoute `--seed` suivi d’un entier pour retrouver les mêmes tirages. Le replay enregistre la graine de la session.
+
+Le 15 novembre 2026, avec six ventouses et 64 matchs d’entraînement (graine 7), le réseau a ramené **10 piles en 26,88 s** sur la table officielle, en deux décharges de six et quatre piles (replay local `7`). Avec quatre ventouses, il avait ramené les dix piles en **30,82 s** après 100 matchs (replay `6`).
 
 **Reprendre les poids sauvegardés et jouer 100 matchs d’entraînement**
 
@@ -72,7 +103,7 @@ Le pilotage manuel et les replays s’ouvrent en plein écran. Le tapis garde se
 - **Reset match** remet le robot dans la salle du trône jaune, replace les piles, coupe les ventouses et remet le temps à zéro.
 - **Score jaune** affiche les points de construction selon la position actuelle des piles libres, qu’elles aient été poussées ou déposées.
 
-Le châssis provisoire défini dans `RobotRobotronik.toml` est un triangle équilatéral de 380 mm équipé de quatre ventouses. Le moteur utilise le triangle comme contour de collision du châssis et ajoute l’encombrement des piles tenues. Le simulateur accélère et freine à 1 m/s² en translation, avec une vitesse maximale de 1 m/s et une vitesse de rotation de 360°/s. Les coordonnées de la table vont de gauche à droite et de haut en bas, en millimètres depuis le coin supérieur gauche du tapis.
+Le châssis provisoire défini dans `RobotRobotronik.toml` est un triangle équilatéral de 410 mm équipé de six ventouses. Le moteur utilise le triangle comme contour de collision du châssis et ajoute l’encombrement des piles tenues. Le simulateur accélère et freine à 1 m/s² en translation, avec une vitesse maximale de 1 m/s et une vitesse de rotation de 360°/s. Les coordonnées de la table vont de gauche à droite et de haut en bas, en millimètres depuis le coin supérieur gauche du tapis.
 
 La table contient dix piles de trois pierres aux emplacements officiels. Chaque pile est un corps rigide de 320 × 110 mm vu du dessus. Une poussée centrée la fait glisser. Une poussée décentrée peut aussi la faire pivoter, selon le point de contact. Les piles se repoussent et ralentissent sous l’effet du frottement. Le robot s’arrête si la poussée se retrouve bloquée par une bordure ou un obstacle fixe. Les dessins des remparts, tours, douves et ponts sont imprimés sur le tapis. [Règlement Eurobot 2027, § D.4 et G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
 
@@ -105,7 +136,7 @@ Le replay affiche les poses enregistrées, la cible du robot, l’action en cour
 
 - `contour_mm` contient les sommets du châssis, mesurés depuis son centre de rotation. Suis l’ordre du périmètre dans l’un ou l’autre sens. Le contour doit être convexe, sans sommets alignés, et tenir sur le tapis à la position de départ.
 - Chaque bloc `[[ventouses]]` définit une ventouse. `position_mm` donne sa position dans le même repère que le contour. `angle_deg` indique vers où elle pointe. L’axe X positif et l’angle 0° pointent vers l’avant. L’axe Y positif et l’angle 90° pointent vers le bas du tapis lorsque le robot est à son cap initial.
-- Ajoute, déplace ou supprime des blocs pour changer l’équipement. Leur ordre donne les numéros. Les touches **1 à 9** pilotent les neuf premières ventouses et **0** pilote la dixième. Toutes sont cliquables. Par défaut, **1** et **4** sont à l’avant, à 100 mm de part et d’autre du milieu de la face. **2** et **3** sont sur les côtés, chacune sur une face.
+- Ajoute, déplace ou supprime des blocs pour changer l’équipement. Leur ordre donne les numéros. Les touches **1 à 9** pilotent les neuf premières ventouses et **0** pilote la dixième. Toutes sont cliquables. Par défaut, **1** et **4** sont à l’avant, à 100 mm de part et d’autre du milieu de la face. **2** et **3** sont sur les côtés. **5** et **6** pointent vers l’arrière depuis la pointe du triangle, à 60 mm l’une de l’autre.
 
 ## Architecture
 

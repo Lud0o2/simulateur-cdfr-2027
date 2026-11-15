@@ -412,6 +412,16 @@ class Simulation:
     def held_pile(self, cup: int) -> int | None:
         return next((index for index, pile in enumerate(self._piles) if pile.grip and pile.grip.cup == cup), None)
 
+    def unload_at_start(self) -> int:
+        """Retire les piles portées lorsque le châssis est à l'arrêt dans la zone de départ."""
+        if self.return_score != 10:
+            return 0
+        carried = [pile.grip.shape for pile in self._piles if pile.grip is not None]
+        if carried:
+            self._space.remove(*carried)
+            self._piles = [pile for pile in self._piles if pile.grip is None]
+        return len(carried)
+
     def can_turn_freely(self, angle: float) -> bool:
         polygons = (*(rectangle_corners(obstacle) for obstacle in self.obstacles),
                     *(pile.free_block().corners for pile in self._piles if not pile.grip))

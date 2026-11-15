@@ -5,9 +5,11 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from copy import copy
-from math import cos, hypot, pi, remainder, sin
+from functools import partial
+from math import cos, dist, hypot, pi, remainder, sin
 import os
 from pathlib import Path
+from secrets import randbits
 import signal
 from tempfile import NamedTemporaryFile
 
@@ -17,15 +19,17 @@ from pymunk import Vec2d
 from .match import (
     ALIGNED_ANGLES, CENTERED_DROPS, DROP_ANGLES, MATCH_SECONDS, REPLAY_DIR, _action_state, _drop_target,
     _pickup_approach, _rotated_footprint, _visibility, _wall_drop_zones,
-    completion_beep, play_match, save_replay,
+    completion_beep, play_collection, play_match, save_replay,
 )
-from .simulateur import Block, START_BLOCKS, TABLE_HEIGHT, TABLE_WIDTH, WALL_ZONES, Simulation, free_wall_slots, scoring_zones
+from .simulateur import Block, START, START_BLOCKS, TABLE_HEIGHT, TABLE_WIDTH, WALL_ZONES, Simulation, free_wall_slots, scoring_zones
 
 
 LAYERS = (97, 16, 8, 1)
 TABLE_DIAGONAL = hypot(TABLE_WIDTH, TABLE_HEIGHT)
 ACTION_DISTANCE = 84
 MODEL = REPLAY_DIR.parent / "reseau.npz"
+COLLECTION_MODEL = REPLAY_DIR.parent / "reseau-collecte.npz"
+COLLECTION_LAYERS = (11, 8, 1)
 PICKUP_LIMIT = 8
 EXPLORATION_INTERVAL = 8
 PROGRESS_WINDOW = 50  # matchs d'entraînement sans nouveau record autonome
@@ -118,10 +122,10 @@ def _candidate_count(choices, pickup):
 
 
 class Network:
-    def __init__(self, rng):
+    def __init__(self, rng, layers=LAYERS):
         self.weights = [rng.normal(0, (2 / size) ** 0.5, (size, width)).astype(np.float32)
-                        for size, width in zip(LAYERS, LAYERS[1:])]
-        self.biases = [np.zeros(width, dtype=np.float32) for width in LAYERS[1:]]
+                        for size, width in zip(layers, layers[1:])]
+        self.biases = [np.zeros(width, dtype=np.float32) for width in layers[1:]]
         self.drop_offsets = CENTERED_OFFSETS
         self.drop_angles = ALIGNED_ANGLES
         self.experience = {}
@@ -175,20 +179,20 @@ class Network:
             with file:
                 np.savez(file, *self.weights, *self.biases, drop_offsets=np.asarray(self.drop_offsets),
                          drop_angles=np.asarray(self.drop_angles),
-                         experience=np.concatenate(experience) if experience else np.empty((0, LAYERS[0] + 5)),
+                         experience=np.concatenate(experience) if experience else np.empty((0, self.weights[0].shape[0] + 5)),
                          training_matches=self.training_matches)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
 
     @classmethod
-    def load(cls, path):
-        network = cls(np.random.default_rng(0))
+    def load(cls, path, *, layers=LAYERS):
+        network = cls(np.random.default_rng(0), layers)
         with np.load(path, allow_pickle=False) as data:
             presence_bias = 0
             for index, values in enumerate((*network.weights, *network.biases)):
                 loaded = data[f"arr_{index}"]
-                if index == 0 and loaded.shape == (LAYERS[0] - 1, LAYERS[1]):
+                if layers == LAYERS and index == 0 and loaded.shape == (LAYERS[0] - 1, LAYERS[1]):
                     if loaded.dtype != values.dtype or not np.all(np.isfinite(loaded)):
                         raise ValueError("Paramètres du réseau invalides.")
                     # Les anciennes lignes de présence sont reprises par le biais.
@@ -208,7 +212,7 @@ class Network:
                 network.drop_angles = _read_drop_angles(data["drop_angles"].tolist())
             if "experience" in data:
                 rows = data["experience"]
-                if (rows.ndim != 2 or rows.shape[1] != LAYERS[0] + 5 or rows.dtype != np.float64
+                if (rows.ndim != 2 or rows.shape[1] != layers[0] + 5 or rows.dtype != np.float64
                         or not np.all(np.abs(rows) <= np.finfo(np.float32).max)
                         or not np.all((rows[:, :2] == np.trunc(rows[:, :2]))
                                       & (rows[:, :2] >= -1) & (rows[:, :2] < len(START_BLOCKS)))):
@@ -459,6 +463,80 @@ def _train_matches(count, seed, incumbent, resume, workers, run_matches, *, on_r
     return network, network_rank
 
 
+def _pick_collection(network, simulation, held, actions):
+    carried = set(held.values())
+    stocks = [(index, block.position) for index, block in enumerate(simulation.blocks) if index not in carried]
+    mounts = simulation.geometry.mounts
+    rows = []
+    for (distance, duration, index, cup, pickup), pair in actions:
+        neighbor = min((dist(pickup.end, position) for other, position in stocks if other != index),
+                       default=0)
+        _, facing = mounts[cup - 1]
+        rows.append((distance / TABLE_DIAGONAL, duration / 5, pickup.approach.turn / pi,
+                     dist(pickup.end, START) / TABLE_DIAGONAL, neighbor / TABLE_DIAGONAL,
+                     *facing, len(held) / len(mounts), len(stocks) / len(START_BLOCKS),
+                     (MATCH_SECONDS - simulation.time) / MATCH_SECONDS, pair is not None))
+    return actions[int(np.argmax(network.predict(np.asarray(rows, dtype=np.float32))))]
+
+
+def _simulate_collection(network, *, record_frames=False):
+    return play_collection(Simulation(), policy=partial(_pick_collection, network), record_frames=record_frames)
+
+
+def _train_collection(count, seed, incumbent=None):
+    rng = np.random.default_rng(seed)
+    workers = _training_workers(count)
+    population = []
+    print(f"Collecte · {workers} processus pour {count} matchs · graine {seed}", flush=True)
+    with (ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext()) as pool:
+        run = pool.map if pool else map
+        for start in range(0, count, 8):
+            size = min(8, count - start)
+            previous = population[0][0] if population else None
+            candidates = [Network(rng, COLLECTION_LAYERS) for _ in range(size if not population else min(2, size))]
+            if start == 0 and incumbent is not None:
+                candidates[0] = incumbent
+            mutations = ((parent, spread) for spread in (0.04, 0.12, 0.30) for _, parent in population)
+            for parent, spread in mutations:
+                if len(candidates) == size:
+                    break
+                candidate = parent._training_copy()
+                for values in (*candidate.weights, *candidate.biases):
+                    values += rng.normal(0, spread, values.shape).astype(values.dtype)
+                candidates.append(candidate)
+            population.extend((_replay_rank(replay), candidate)
+                              for candidate, replay in zip(candidates, run(_simulate_collection, candidates), strict=True))
+            population = sorted(population, key=lambda trial: trial[0], reverse=True)[:2]
+            rank = population[0][0]
+            if previous is None or rank > previous:
+                print(f"Matchs {start + size}/{count} · record {rank[0]} piles en {-rank[1]:.2f} s", flush=True)
+    rank, network = population[0]
+    return network, rank
+
+
+def _run_collection(args, model):
+    incumbent = Network.load(model, layers=COLLECTION_LAYERS) if args.resume or args.jouer or model.exists() else None
+    if args.jouer:
+        replay = _simulate_collection(incumbent, record_frames=True)
+    else:
+        seed = args.seed if args.seed is not None else randbits(32)
+        network, rank = _train_collection(args.matches, seed, incumbent if args.resume else None)
+        if incumbent is not None and not args.resume:
+            previous = _replay_rank(_simulate_collection(incumbent))
+            if previous >= rank:
+                network, rank = incumbent, previous
+        replay = _simulate_collection(network, record_frames=True)
+        if _replay_rank(replay) != rank:
+            raise ValueError("Le replay de collecte ne reproduit pas son résultat de validation.")
+        network.save(model)
+        replay.update(graine=seed, matchs_entrainement=args.matches)
+    replay["politique"] = "reseau_collecte"
+    number, _ = save_replay(replay, descriptive=True)
+    print(f"Collecte · {replay['score']}/{replay['total_piles']} piles en {replay['duree']:.2f} s · replay {number}",
+          flush=True)
+    completion_beep()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -469,25 +547,39 @@ def main():
                           help=f"Repart de zéro après {PROGRESS_WINDOW} matchs sans amélioration.")
     train.add_argument("--seed", type=int, default=7, help="Graine des tirages (par défaut : %(default)s).")
     train.add_argument("--resume", action="store_true", help="Repart des poids du fichier choisi.")
+    collection = commands.add_parser("collecte", help="Entraîne ou joue le réseau de collecte seule.")
+    mode = collection.add_mutually_exclusive_group()
+    mode.add_argument("--matches", type=int, default=100, help="Nombre de matchs d'entraînement.")
+    mode.add_argument("--jouer", action="store_true", help="Joue avec les poids de collecte enregistrés.")
+    collection.add_argument("--seed", type=int, help="Graine d'entraînement, tirée au hasard par défaut.")
+    collection.add_argument("--resume", action="store_true", help="Repart des poids de collecte enregistrés.")
     commands.add_parser("compare", help="Compare le réseau sauvegardé à l’étape 4 sur la table officielle.")
-    parser.add_argument("--model", type=Path, default=MODEL)
+    parser.add_argument("--model", type=Path)
     args = parser.parse_args()
     try:
+        if args.command == "collecte":
+            if args.matches < 1:
+                parser.error("--matches doit être strictement positif.")
+            if args.resume and args.jouer:
+                parser.error("--resume s'applique à l'entraînement.")
+            _run_collection(args, args.model or COLLECTION_MODEL)
+            return
+        model = args.model or MODEL
         if args.command == "train":
             if args.matches < 1:
                 parser.error("--matches doit être strictement positif.")
-            incumbent = Network.load(args.model) if args.resume or args.model.exists() else None
+            incumbent = Network.load(model) if args.resume or model.exists() else None
             if args.endless:
-                _train_endless(args.seed, args.model, incumbent, resume=args.resume)
+                _train_endless(args.seed, model, incumbent, resume=args.resume)
                 return
             network, replay = train_matches(args.matches, args.seed, incumbent, resume=args.resume)
-            network.save(args.model)
+            network.save(model)
             number, _ = save_replay(replay)
             print(f"Session · {replay['score']} points en {replay['duree']:.2f} s · replay {number}", flush=True)
             completion_beep()
             return
 
-        network = Network.load(args.model)
+        network = Network.load(model)
         reference = play_match(Simulation(), record_frames=False)
         replay = play_match(Simulation(), policy=MatchPolicy(network))
         score = replay["score"]
