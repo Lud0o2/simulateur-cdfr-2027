@@ -5,8 +5,9 @@ from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
+from hashlib import blake2b
 import json
-from math import cos, isfinite, radians, remainder, sin, tau
+from math import cos, degrees, isfinite, radians, remainder, sin, tau
 import os
 from pathlib import Path
 from random import Random
@@ -19,7 +20,7 @@ from time import perf_counter
 import numpy as np
 from pymunk import Vec2d
 
-from .match import CENTERED_DROPS, MATCH_SECONDS, REPLAY_DIR, Replay, play_match
+from .match import CENTERED_DROPS, MATCH_SECONDS, REPLAY_DIR, Replay, play_match, save_replay
 from .reseau import _training_workers
 from .simulateur import TABLE_HEIGHT, TABLE_WIDTH, Simulation, _finite_number, scoring_zones
 
@@ -35,6 +36,10 @@ N_INPUTS = len(INPUTS)
 MAX_HIDDEN = 12
 MAX_LINKS = 120
 WEIGHT_LIMIT = 32
+WEIGHT_RESET_RATE = 0.01
+TARGET_SCORE = 65
+STRATEGY_ARCHIVE_LIMIT = 128
+DESCENDANT_SIGMA_FACTOR = 1.5
 
 # shortcut: un échantillon fixe de poses réalisables, à élargir si la capacité des remparts limite le score.
 DROP_VARIANTS = (
@@ -58,8 +63,8 @@ class Settings:
     generations: int = 0
     seed: int = 0
     sigma: float = 0.28
-    add_node: float = 0.22
-    add_link: float = 0.32
+    add_node: float = 0.40
+    add_link: float = 0.50
 
     def __post_init__(self):
         if (self.population < 2 or self.generations < 0 or not isfinite(self.sigma)
@@ -123,6 +128,9 @@ def mutate(genome, rng, settings, spread):
         links[index] = source, target, perturb(weight)
     index = rng.randrange(max(1, len(biases) - 1))
     biases[index] = perturb(biases[index])
+    for index, (source, target, _) in enumerate(links):
+        if rng.random() < WEIGHT_RESET_RATE:
+            links[index] = source, target, rng.uniform(-1.0, 1.0)
 
     if len(biases) <= MAX_HIDDEN and len(links) < MAX_LINKS and rng.random() < settings.add_node:
         source, target, weight = links.pop(rng.randrange(len(links)))
@@ -182,6 +190,7 @@ class NeatPolicy:
     def __init__(self, genome):
         self.matrix = genome.weights()
         self.biases = genome.biases
+        self.actions = []
 
     def order(self, simulation, held, choices, *, pickup, can_finish=False, pickup_plans=None):
         inputs = observations(simulation, held, choices, pickup=pickup,
@@ -194,8 +203,15 @@ class NeatPolicy:
         candidates = [*choices, None] if can_finish else choices
         return [candidates[index] for index in np.argsort(-values[:, -1], kind="stable")]
 
-    def observe(self, _choice):
-        pass
+    def observe(self, choice):
+        if choice is None:
+            self.actions.append(("finish",))
+        elif len(choice) == 3:
+            _, pile, cup = choice
+            self.actions.append(("take", pile, cup))
+        else:
+            _, _, cup, site, angle = choice
+            self.actions.append(("drop", cup, round(site.x), round(site.y), round(degrees(angle)) % 180))
 
 
 def fitness(match):
@@ -203,9 +219,14 @@ def fitness(match):
 
 
 def evaluate(genome, record_frames=False):
-    match = play_match(Simulation(), policy=NeatPolicy(genome), drop_poses=DROP_POSES,
+    policy = NeatPolicy(genome)
+    match = play_match(Simulation(), policy=policy, drop_poses=DROP_POSES,
                        full_match=True, record_frames=record_frames)
-    return match if record_frames else fitness(match)
+    if record_frames:
+        return match
+    rank = fitness(match)
+    strategy = blake2b(repr(policy.actions).encode(), digest_size=12).hexdigest() if rank[0] >= TARGET_SCORE else None
+    return rank, strategy
 
 
 @dataclass(frozen=True)
@@ -214,24 +235,34 @@ class Individual:
     generation: int
     genome: Genome
     rank: tuple[int, float] | None = None
+    strategy: str | None = None
 
     def selection_key(self):
-        return self.rank, -self.id
+        return self.rank[1], -self.id
 
 
-def parent_weights(ranked):
-    count = len(ranked)
-    weights = {item.rank: count - index for index, item in reversed(list(enumerate(ranked)))}
-    return [weights[item.rank] for item in ranked]
+def remember_strategies(archive, qualified):
+    for individual in sorted(qualified, key=lambda item: item.id):
+        strategy = individual.strategy
+        previous = archive.get(strategy)
+        if previous is None and len(archive) == STRATEGY_ARCHIVE_LIMIT:
+            del archive[next(iter(archive))]
+        if previous is None or individual.selection_key() > previous.selection_key():
+            archive[strategy] = individual
 
 
-def offspring(ranked, rng, settings, spread, generation, first_id):
-    elite = max(1, settings.population // 12)
-    fresh = max(1, settings.population // 10) if settings.population >= 4 else 0
-    parents = rng.choices(ranked, weights=parent_weights(ranked), k=settings.population - elite - fresh)
-    genomes = [mutate(parent.genome, rng, settings, spread * rng.choice((0.5, 1, 2))) for parent in parents]
+def offspring(population, rng, settings, generation, first_id, archive):
+    fresh = settings.population // 10
+    inherited = settings.population - fresh
+    archived = inherited // 4 if archive else 0
+    parents = rng.choices(archive, k=archived)
+    parents.extend(max(rng.choices(population, k=3), key=lambda item: item.rank)
+                   for _ in range(inherited - archived))
+    genomes = [parent.genome for parent in parents]
     genomes.extend(initial_genome(rng, 0.8) for _ in range(fresh))
-    return [*ranked[:elite], *(Individual(first_id + i, generation, genome) for i, genome in enumerate(genomes))]
+    spread = settings.sigma * DESCENDANT_SIGMA_FACTOR
+    return [Individual(first_id + i, generation, mutate(genome, rng, settings, spread * rng.choice((0.5, 1, 2))))
+            for i, genome in enumerate(genomes)]
 
 
 def write_champion(directory, individual, match, settings, initial=None):
@@ -282,10 +313,10 @@ def new_directory(path):
 
 
 def latest_directory():
-    try:
-        return max(path.parent for path in RUN_DIR.glob(f"*/{CHAMPION_FILE}"))
-    except ValueError as exc:
-        raise FileNotFoundError("Aucun champion NEAT. Lance d'abord l'entraînement.") from exc
+    for path in sorted(RUN_DIR.glob(f"*/{CHAMPION_FILE}"), reverse=True):
+        if json.loads(path.read_text(encoding="utf-8"))["scenario"] == SCENARIO:
+            return path.parent
+    raise FileNotFoundError("Aucun champion NEAT en solo. Lance d'abord l'entraînement.")
 
 
 def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
@@ -305,9 +336,8 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
     champion = saved = None
     recording = None
     simulations = completed = 0
-    spread = settings.sigma
     generation = 1
-    best_generation = 1
+    archive = {}
     results = []
 
     def report(status="Entraînement", **event):
@@ -318,19 +348,22 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
 
     def save_recording(recording):
         future, individual = recording
-        data = write_champion(directory, individual, future.result(), settings, initial)
-        report(champion=data, log=f"Champion #{individual.id} sauvegardé")
+        match = future.result()
+        data = write_champion(directory, individual, match, settings, initial)
+        number, _ = save_replay(match, REPLAY_DIR, descriptive=True)
+        report(champion=data, log=f"Champion #{individual.id} sauvegardé · replay {number}")
         return individual
 
-    report(log=f"Graine {settings.seed} · {workers} processus · amplitude {spread:.3f}")
+    report(log=f"Graine {settings.seed} · seuil {TARGET_SCORE} pts · {workers} processus")
     if initial is not None:
         report(log="Population initialisée autour du génome importé")
     with ProcessPoolExecutor(max_workers=workers) as pool, (directory / "generations.jsonl").open(
         "a", encoding="utf-8",
     ) as history:
         while not stop.is_set() and (settings.generations == 0 or generation <= settings.generations):
-            results = [item for item in population if item.rank is not None]
-            waiting = deque(item for item in population if item.rank is None)
+            results = []
+            qualified = []
+            waiting = deque(population)
             tasks = {}
             report(log=f"Génération {generation}")
             while tasks or (waiting and not stop.is_set()):
@@ -351,17 +384,19 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
                     report("Pause demandée")
                 ready, _ = wait(futures, timeout=0.25, return_when=FIRST_COMPLETED)
                 for task in sorted(ready & tasks.keys(), key=lambda item: tasks[item].id):
-                    individual = replace(tasks.pop(task), rank=task.result())
+                    rank, strategy = task.result()
+                    individual = replace(tasks.pop(task), rank=rank, strategy=strategy)
                     results.append(individual)
                     simulations += 1
                     message = {}
-                    if champion is None or individual.selection_key() > champion.selection_key():
-                        if champion is None or individual.rank > champion.rank:
-                            score, time = individual.rank
-                            change = "Record de score" if champion is None or score > champion.rank[0] else "Temps amélioré"
-                            message["log"] = f"{change} · {score} pts en {-time:.2f} s · réseau #{individual.id}"
-                            best_generation = generation
-                        champion = individual
+                    score, time = individual.rank
+                    if score >= TARGET_SCORE:
+                        qualified.append(individual)
+                        if champion is None or individual.selection_key() > champion.selection_key():
+                            if champion is None or time > champion.rank[1]:
+                                change = "Objectif atteint" if champion is None else "Temps amélioré"
+                                message["log"] = f"{change} · {score} pts en {-time:.2f} s · réseau #{individual.id}"
+                            champion = individual
                     report("Pause demandée" if pause.is_set() else "Entraînement", **message)
                 if recording and recording[0] in ready:
                     saved = save_recording(recording)
@@ -369,32 +404,32 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
 
             if len(results) != settings.population:
                 break
-            ranked = sorted(results, key=Individual.selection_key, reverse=True)
-            scores = [item.rank[0] for item in ranked]
-            leader = ranked[0]
-            stats = dict(generation=generation, id=leader.id, best=scores[0], time=-leader.rank[1],
+            remember_strategies(archive, qualified)
+            scores = [item.rank[0] for item in results]
+            leader = (max(qualified, key=Individual.selection_key) if qualified
+                      else max(results, key=lambda item: (item.rank, -item.id)))
+            stats = dict(generation=generation, id=leader.id, best=leader.rank[0], time=-leader.rank[1],
+                         qualified=len(qualified), archived_strategies=len(archive),
                          mean=mean(scores), median=median(scores), distribution=sorted(Counter(scores).items()),
-                         simulations=simulations, elapsed=perf_counter() - started, sigma=spread)
+                         simulations=simulations, elapsed=perf_counter() - started, sigma=settings.sigma * DESCENDANT_SIGMA_FACTOR)
             history.write(json.dumps(stats, separators=(",", ":")) + "\n")
             history.flush()
             completed += 1
-            report(stats=stats, log=(f"Génération {generation} · {scores[0]} pts en {-leader.rank[1]:.2f} s"
-                                    f" · moyenne {stats['mean']:.1f} pts"))
+            report(stats=stats, log=(f"Génération {generation} · {len(qualified)}/{settings.population} qualifiés"
+                                    f" · meilleur {leader.rank[0]} pts en {-leader.rank[1]:.2f} s"
+                                    f" · {len(archive)} stratégies en mémoire"))
             if stop.is_set() or completed == settings.generations:
                 break
             generation += 1
-            adjusted = settings.sigma * (1 + min(2, (generation - best_generation - 1) // 3))
-            if adjusted != spread:
-                spread = adjusted
-                report(log=f"Amplitude des mutations · {spread:.3f}")
-            population = offspring(ranked, rng, settings, spread, generation,
-                                   (generation - 1) * settings.population + 1)
+            population = offspring(sorted(results, key=lambda item: item.id), rng, settings, generation,
+                                   (generation - 1) * settings.population + 1,
+                                   [archive[key] for key in sorted(archive)])
         if recording is not None:
             saved = save_recording(recording)
         if champion != saved:
             save_recording((pool.submit(evaluate, champion.genome, True), champion))
     if stop.is_set():
-        detail = f"champion #{champion.id} sauvegardé" if champion is not None else "aucun match évalué"
+        detail = f"champion #{champion.id} sauvegardé" if champion is not None else "aucun réseau qualifié"
         report("Terminé", log=f"Entraînement arrêté · {detail}")
     else:
         report("Terminé", log="Entraînement terminé")
@@ -423,8 +458,8 @@ def main():
     parser.add_argument("--generations", type=int, help="0 pour continuer jusqu'à l'arrêt")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--sigma", type=float, default=0.28)
-    parser.add_argument("--add-node", type=float, default=0.22)
-    parser.add_argument("--add-link", type=float, default=0.32)
+    parser.add_argument("--add-node", type=float, default=Settings.add_node)
+    parser.add_argument("--add-link", type=float, default=Settings.add_link)
     parser.add_argument("--from-genome", type=Path, help="génome JSON ou champion.json pour initialiser la population")
     args = parser.parse_args()
     try:

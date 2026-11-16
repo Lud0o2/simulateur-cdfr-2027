@@ -8,9 +8,10 @@ import unittest
 from unittest.mock import patch
 
 from src.interface import Playback
-from src.match import MATCH_SECONDS, Replay, play_match
+from src.match import MATCH_SECONDS, Replay, main as match_main, play_match
 from src.neat import (CHAMPION_FILE, MAX_HIDDEN, MAX_LINKS, N_INPUTS, Genome, Individual, Settings, fitness,
-                      initial_genome, mutate, offspring, parent_weights, read_champion, train, write_champion)
+                      initial_genome, latest_directory, mutate, offspring, read_champion, remember_strategies,
+                      train, write_champion)
 from src.simulateur import Simulation, WALL_ZONES
 
 
@@ -18,13 +19,15 @@ def empty_match():
     return play_match(Simulation(blocks=()), full_match=True)
 
 
-class FitnessTest(unittest.TestCase):
-    def test_points_always_precede_time(self):
-        matches = [(60, 30), (70, 95), (65, 50), (70, 90)]
-        ranking = sorted(matches, key=lambda pair: fitness(dict(score_max=pair[0], temps_score_max=pair[1])),
-                         reverse=True)
-        self.assertEqual(ranking, [(70, 90), (70, 95), (65, 50), (60, 30)])
+def match_at_65(time):
+    match = empty_match()
+    first, last = match["frames"]
+    match.update(score=65, score_max=65, temps_score_max=time,
+                 frames=[first, dict(last, t=time, score=65), dict(last, score=65)])
+    return match
 
+
+class FitnessTest(unittest.TestCase):
     def test_match_tracks_first_peak_even_if_points_are_lost(self):
         def build(simulation, record):
             simulation.advance(1)
@@ -76,16 +79,52 @@ class GenomeTest(unittest.TestCase):
             with self.subTest(links=links), self.assertRaises(ValueError):
                 Genome.read(dict(biases=[0], links=links))
 
-    def test_parent_selection_favors_rank_and_keeps_elites(self):
-        settings = Settings(population=4)
-        genome = initial_genome(Random(8), 0)
-        ranked = [Individual(i, 1, genome, rank) for i, rank in enumerate(((65, -90), (65, -90), (60, -10), (55, -5)))]
-        self.assertEqual(parent_weights(ranked), [4, 4, 2, 1])
-        children = offspring(ranked, Random(17), settings, 0.3, 2, 5)
+    def test_mutation_can_reset_connection_weights_without_perturbation(self):
+        rng = Random(17)
+        settings = Settings(add_node=0, add_link=0)
+        genome = Genome((0.0,), ((0, N_INPUTS, 2.0), (1, N_INPUTS, 2.0)))
+        with (patch.object(rng, "gauss", return_value=0.0),
+              patch.object(rng, "random", side_effect=(0.009, 0.25, 0.01, 0.5, 0.5))):
+            child = mutate(genome, rng, settings, 0.3)
+        self.assertEqual(child, Genome(genome.biases, ((0, N_INPUTS, -0.5), (1, N_INPUTS, 2.0))))
+
+    def test_offspring_combines_archived_parents_tournaments_and_new_weights(self):
+        settings = Settings(population=200)
+        population = [Individual(i, 1, initial_genome(Random(i), 0.8), (65 if i <= 40 else 64, -i))
+                      for i in range(1, 201)]
+        archive = population[:3]
+        rng = Random(17)
+        with (patch.object(rng, "choices", wraps=rng.choices) as draw,
+              patch("src.neat.initial_genome", wraps=initial_genome) as random_genomes,
+              patch("src.neat.mutate", wraps=mutate) as mutations):
+            children = offspring(population, rng, settings, 2, 201, archive)
+        self.assertEqual(draw.call_args_list[0].args, (archive,))
+        self.assertEqual(draw.call_args_list[0].kwargs, {"k": 45})
+        expected_rng = Random(17)
+        selected = expected_rng.choices(archive, k=45)
+        selected.extend(max(expected_rng.choices(population, k=3), key=lambda item: item.rank)
+                        for _ in range(135))
+        self.assertEqual([call.args[0] for call in mutations.call_args_list[:180]],
+                         [parent.genome for parent in selected])
+        self.assertEqual(random_genomes.call_count, 20)
+        self.assertEqual(mutations.call_count, 200)
         self.assertEqual(len(children), settings.population)
-        self.assertIs(children[0], ranked[0])
-        self.assertTrue(all(child.rank is None for child in children[1:]))
-        self.assertEqual(children, offspring(ranked, Random(17), settings, 0.3, 2, 5))
+        self.assertTrue(all(child.rank is None for child in children))
+        self.assertEqual(children, offspring(population, Random(17), settings, 2, 201, archive))
+
+    def test_strategy_archive_keeps_fastest_per_route_and_evicts_oldest(self):
+        genome = initial_genome(Random(17), 0)
+        original = Individual(1, 1, genome, (65, -60), "A")
+        faster = Individual(2, 1, genome, (65, -50), "A")
+        slower = Individual(3, 1, genome, (65, -70), "A")
+        other = Individual(4, 1, genome, (65, -55), "B")
+        recent = Individual(5, 2, genome, (65, -65), "C")
+        archive = {}
+        with patch("src.neat.STRATEGY_ARCHIVE_LIMIT", 2):
+            remember_strategies(archive, [other, faster, slower, original])
+            self.assertEqual(archive, {"A": faster, "B": other})
+            remember_strategies(archive, [recent])
+        self.assertEqual(archive, {"B": other, "C": recent})
 
 
 class TrainingTest(unittest.TestCase):
@@ -104,11 +143,35 @@ class TrainingTest(unittest.TestCase):
             self.assertEqual(genome, individual.genome)
             self.assertEqual(replay.frames, match["frames"])
 
-    def test_generations_keep_champion_and_reuse_elite_evaluation(self):
+    def test_default_replays_skip_saved_duels(self):
+        match = empty_match()
+        duel_match = dict(match, score_adverse=18)
+        individual = Individual(1, 1, initial_genome(Random(3), 0), fitness(match))
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            solo, duel = root / "session-1", root / "session-2"
+            solo.mkdir()
+            duel.mkdir()
+            champion = write_champion(solo, individual, match, Settings(seed=13))
+            (duel / CHAMPION_FILE).write_text(json.dumps(dict(champion, scenario="duel", replay=duel_match)),
+                                             encoding="utf-8")
+            (root / "essai-0001.json").write_text(json.dumps(match), encoding="utf-8")
+            (root / "essai-0002.json").write_text(json.dumps(duel_match), encoding="utf-8")
+            with patch("src.neat.RUN_DIR", root):
+                self.assertEqual(latest_directory(), solo)
+            with (patch("src.match.REPLAY_DIR", root), patch("src.interface.create_window") as window,
+                  patch("sys.argv", ["match", "replay"])):
+                match_main()
+            self.assertEqual(window.call_args.kwargs["trial"], 1)
+            with self.assertRaisesRegex(ValueError, "incompatible avec le mode solo"):
+                Replay(duel_match)
+
+    def test_only_qualified_genomes_can_become_champion(self):
         events = []
         pause = Event()
         pause.set()
-        match = empty_match()
+        match = match_at_65(30)
+        ranks = iter(((64, -1), (60, -2), (65, -30), (64, -3)))
 
         def publish(event):
             events.append(event)
@@ -117,43 +180,53 @@ class TrainingTest(unittest.TestCase):
                 pause.clear()
 
         def evaluate(_genome, record_frames=False):
-            return match if record_frames else fitness(match)
+            if record_frames:
+                return match
+            rank = next(ranks)
+            return rank, "route" if rank[0] == 65 else None
 
         with (TemporaryDirectory() as folder, patch("src.neat.ProcessPoolExecutor", ThreadPoolExecutor),
-              patch("src.neat.evaluate", side_effect=evaluate)):
+              patch("src.neat.evaluate", side_effect=evaluate), patch("src.neat.offspring", wraps=offspring) as reproduce):
             directory = Path(folder)
-            train(Settings(population=2, generations=2, seed=13), directory, publish, pause=pause)
+            replays = directory / "replays"
+            with patch("src.neat.REPLAY_DIR", replays):
+                train(Settings(population=2, generations=2, seed=13), directory, publish, pause=pause)
             history = [json.loads(line) for line in (directory / "generations.jsonl").read_text().splitlines()]
             data, _, _ = read_champion(directory)
-        self.assertEqual([stats["simulations"] for stats in history], [2, 3])
-        self.assertEqual(data["generation"], 1)
-        self.assertEqual(data["id"], 1)
+            self.assertEqual([path.name for path in replays.iterdir()], ["essai-0001-65pts-30.00s.json"])
+            with (patch("src.match.REPLAY_DIR", replays), patch("src.interface.create_window") as window,
+                  patch("sys.argv", ["match", "replay", "1"])):
+                match_main()
+            self.assertEqual(window.call_args.kwargs["trial"], 1)
+            self.assertEqual(window.call_args.kwargs["replay"].frames, match["frames"])
+        self.assertEqual([item.id for item in reproduce.call_args.args[0]], [1, 2])
+        self.assertEqual([(stats["simulations"], stats["qualified"]) for stats in history], [(2, 0), (4, 1)])
+        self.assertEqual(data["generation"], 2)
+        self.assertEqual(data["id"], 3)
         self.assertEqual(events[-1]["status"], "Terminé")
         self.assertIn("Pause", [event["status"] for event in events])
 
     def test_next_generation_starts_during_replay_and_stop_saves_latest_champion(self):
-        match = empty_match()
         stop = Event()
-        scores = {}
+        times = {}
         first_recording = None
 
         def submit(_evaluate, genome, record_frames=False):
             nonlocal first_recording
             future = Future()
             if record_frames:
-                score = scores[genome]
-                replay = dict(match, score=score, score_max=score, frames=[dict(frame, score=score) for frame in match["frames"]])
+                replay = match_at_65(times[genome])
                 if first_recording is None:
                     first_recording = future, replay
                 else:
                     future.set_result(replay)
             else:
-                score = scores[genome] = 11 + len(scores)
-                if len(scores) == 4:
+                time = times[genome] = 50 - len(times)
+                if len(times) == 4:
                     pending, replay = first_recording
                     self.assertFalse(pending.done())
                     pending.set_result(replay)
-                future.set_result((score, 0))
+                future.set_result(((65, -time), str(time)))
             return future
 
         def wait(futures, **_options):
@@ -170,9 +243,13 @@ class TrainingTest(unittest.TestCase):
               patch("src.neat.wait", side_effect=wait)):
             pool.return_value.__enter__.return_value.submit.side_effect = submit
             directory = Path(folder)
-            champion = train(Settings(population=3, seed=13), directory, publish, stop=stop)
+            with patch("src.neat.REPLAY_DIR", directory / "replays"):
+                champion = train(Settings(population=3, seed=13), directory, publish, stop=stop)
             data, genome, _ = read_champion(directory)
-        self.assertEqual((data["id"], data["generation"], data["score"], genome), (4, 2, 14, champion.genome))
+            replay = max((directory / "replays").glob("essai-*.json"))
+            self.assertEqual(json.loads(replay.read_text(encoding="utf-8")), data["replay"])
+        self.assertEqual((data["id"], data["generation"], data["score"], data["time"], genome),
+                         (4, 2, 65, 47, champion.genome))
 
     def test_replay_swaps_pending_champion_at_loop_boundary(self):
         first, second = Replay(empty_match()), Replay(empty_match())

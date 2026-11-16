@@ -387,7 +387,8 @@ def _action_state(simulation):
     return Vec2d(*simulation.position), tuple(simulation.footprints()), tuple((p, _bounds(p)) for p in polygons)
 
 
-def take_pile(simulation: Simulation, pile: int, cup: int, *, advance=None, deadline=None) -> bool:
+def take_pile(simulation: Simulation, pile: int, cup: int, *, advance=None, deadline=None,
+              direct=False) -> bool:
     """Rejoint un grand côté de la pile désignée et la saisit avec la ventouse choisie."""
     blocks = simulation.blocks
     if (simulation.moving or type(pile) is not int or not 0 <= pile < len(blocks)
@@ -395,7 +396,7 @@ def take_pile(simulation: Simulation, pile: int, cup: int, *, advance=None, dead
             or simulation.held_pile(cup) is not None
             or any(simulation.held_pile(number) == pile for number in range(1, len(simulation.geometry.mounts) + 1))):
         return False
-    pickup = _pickup_approach(simulation, blocks[pile], cup, _action_state(simulation))
+    pickup = _pickup_approach(simulation, blocks[pile], cup, _action_state(simulation), direct=direct)
     return pickup is not None and _take_pickup(simulation, pile, cup, pickup, advance=advance, deadline=deadline)
 
 
@@ -425,7 +426,7 @@ def _stroke_end(start, delta, footprints, obstacles):
     return start + delta * fraction
 
 
-def _pickup_options(simulation, block, cup, state):
+def _pickup_options(simulation, block, cup, state, *, direct=False):
     mount, facing = simulation.geometry.mounts[cup - 1]
     start, footprints, obstacles = state
     center = Vec2d(*block.position)
@@ -449,7 +450,7 @@ def _pickup_options(simulation, block, cup, state):
         if abs(angle) < 1e-12:
             angle = 0
         contact = center + normal * (half_width + PICKUP_GAP) - pickup.rotated(heading)
-        standoff = contact + normal * (PICKUP_STANDOFF - PICKUP_GAP)
+        standoff = contact if direct else contact + normal * (PICKUP_STANDOFF - PICKUP_GAP)
         rotated = tuple(tuple(Vec2d(*corner).rotated(angle) for corner in shape) for shape in footprints)
         if not _clear(standoff, contact, rotated, obstacles):
             continue
@@ -457,14 +458,15 @@ def _pickup_options(simulation, block, cup, state):
         if approach is not None:
             approach = replace(approach, duration=approach.duration + travel_time(standoff.get_distance(contact)),
                                after=(*approach.after, contact))
-            end = standoff - normal * PICKUP_STROKE
+            end = standoff - normal * (PICKUP_GAP if direct else PICKUP_STROKE)
             held = tuple(Vec2d(*corner) - contact for corner in block.corners)
             others = tuple(obstacle for obstacle in obstacles if obstacle[0] != block.corners)
             yield Pickup(approach, _stroke_end(contact, end - contact, (*rotated, held), others))
 
 
-def _pickup_approach(simulation, block, cup, state):
-    return min(_pickup_options(simulation, block, cup, state), key=lambda option: option.duration, default=None)
+def _pickup_approach(simulation, block, cup, state, *, direct=False):
+    return min(_pickup_options(simulation, block, cup, state, direct=direct),
+               key=lambda option: option.duration, default=None)
 
 
 def _wall_drop_zones(block: Block):
@@ -500,7 +502,7 @@ def _drop_approach(block, destination, angle, state):
 
 
 def place_pile(simulation: Simulation, cup: int, x: float, y: float, angle: float, *, advance=None,
-               deadline=None, on_release=None) -> bool:
+               deadline=None, on_release=None, retreat=True) -> bool:
     """Dépose la pile à la pose demandée, puis recule si l'espace le permet."""
     if (simulation.moving or type(cup) is not int or not 1 <= cup <= len(simulation.geometry.mounts)
             or not all(_finite_number(value) for value in (x, y, angle))
@@ -522,7 +524,8 @@ def place_pile(simulation: Simulation, cup: int, x: float, y: float, angle: floa
     simulation.toggle_suction(cup)
     if on_release is not None:
         on_release()
-    _drop_retreat(simulation, cup, advance=advance, deadline=deadline)
+    if retreat:
+        _drop_retreat(simulation, cup, advance=advance, deadline=deadline)
     return True
 
 
@@ -985,9 +988,63 @@ def play_collection(simulation: Simulation, *, policy=None, record_frames=True):
     return replay
 
 
+def _play_action_plan(simulation, record, actions):
+    if not isinstance(actions, (list, tuple)) or len(actions) > 2 * len(simulation.blocks):
+        raise ValueError("Séquence de prises et de dépôts invalide.")
+    held = {}
+    for step in actions:
+        if (not isinstance(step, (list, tuple)) or len(step) < 2 or type(step[1]) is not int
+                or not 0 <= step[1] < len(simulation.blocks)):
+            raise ValueError("Identifiant de pile invalide dans la séquence.")
+        kind, pile, *parameters = step
+        if kind == "take" and len(parameters) == 1 and not scoring_zones(simulation.blocks[pile])[1]:
+            cup, = parameters
+
+            def advance(seconds):
+                simulation.advance(seconds)
+                record(f"Prise pile {pile + 1} · ventouse {cup}")
+
+            if take_pile(simulation, pile, cup, advance=advance, deadline=BUILD_DEADLINE, direct=True):
+                held[pile] = cup
+                record(f"Pile {pile + 1} tenue · {len(held)} pile(s) en charge")
+                continue
+        elif (kind in ("drop", "drop_pair") and pile in held
+              and len(parameters) == (4 if kind == "drop_pair" else 3)):
+            cup = held[pile]
+            other = None
+            if kind == "drop_pair":
+                other = parameters.pop()
+                if type(other) is not int or other == pile or other not in held:
+                    raise ValueError("Seconde pile invalide pour le dépôt groupé.")
+
+            def advance(seconds):
+                simulation.advance(seconds)
+                record(f"Transport pile {pile + 1} · ventouse {cup}")
+
+            def release():
+                record(f"Dépôt pile {pile + 1} · {len(held) - 1} pile(s) en charge")
+
+            # Le prochain trajet valide la sortie avec le châssis déchargé.
+            if place_pile(simulation, cup, *parameters, advance=advance, deadline=BUILD_DEADLINE,
+                          on_release=release if other is None else None, retreat=False):
+                del held[pile]
+                if other is not None:
+                    placed = simulation.blocks[other]
+                    if not place_pile(simulation, held[other], *placed.position, placed.angle, advance=advance,
+                                      deadline=BUILD_DEADLINE, retreat=False):
+                        raise ValueError(f"Dépôt groupé impossible pour la pile {other + 1}.")
+                    del held[other]
+                    record(f"Dépôt groupé piles {pile + 1} et {other + 1} · {len(held)} pile(s) en charge")
+                continue
+        raise ValueError(f"Action impossible pour la pile {pile + 1} ({kind}).")
+    if held:
+        raise ValueError("La séquence laisse des piles sur le robot.")
+
+
 def play_match(simulation: Simulation, *, batches=False, policy=None, record_frames=True,
-               full_match=False, drop_poses=None):
-    batches = batches or policy is not None
+               full_match=False, drop_poses=None, actions=None):
+    batches = batches or policy is not None or actions is not None
+    full_match = full_match or actions is not None
     frames = []
     peak = (0, -round(simulation.time, 6))
 
@@ -1015,7 +1072,9 @@ def play_match(simulation: Simulation, *, batches=False, policy=None, record_fra
     record("Départ")
     offsets = getattr(policy, "drop_offsets", None)
     angles = getattr(policy, "drop_angles", ALIGNED_ANGLES)
-    if batches:
+    if actions is not None:
+        _play_action_plan(simulation, record, actions)
+    elif batches:
         angles = tuple(min(DROP_ANGLES, key=lambda candidate: abs(remainder(candidate - angle, pi)))
                        for angle in angles)
         if drop_poses is None:
@@ -1104,8 +1163,12 @@ def _trials(directory: Path):
 
 
 def save_replay(replay, directory: Path = REPLAY_DIR, *, descriptive=False):
-    unit = "piles" if replay.get("strategie") == "opti_take" else "pts"
-    suffix = f"-{replay['score']:d}{unit}-{replay['duree']:.2f}s" if descriptive else ""
+    suffix = ""
+    if descriptive:
+        unit = "piles" if replay.get("strategie") == "opti_take" else "pts"
+        score = replay.get("score_max", replay["score"])
+        seconds = replay.get("temps_score_max", replay["duree"])
+        suffix = f"-{score:d}{unit}-{seconds:.2f}s"
     directory.mkdir(parents=True, exist_ok=True)
     file = NamedTemporaryFile(dir=directory, prefix=".essai-", suffix=".tmp", encoding="utf-8",
                               mode="w", delete=False)
@@ -1155,6 +1218,8 @@ class Replay:
 
         if not isinstance(data, dict) or not isinstance(data.get("frames"), list) or not data["frames"]:
             raise ValueError("le replay doit contenir au moins une image")
+        if "score_adverse" in data:
+            raise ValueError("Replay de duel incompatible avec le mode solo.")
         obstacles = data.get("obstacles")
         if not isinstance(obstacles, (list, tuple)) or not all(coordinates(rect, 4) for rect in obstacles):
             raise ValueError("liste d’obstacles manquante ou invalide")
@@ -1216,20 +1281,42 @@ def main():
     commands.add_parser("collecte", help="Ramène les piles au départ et enregistre le replay.")
     player = commands.add_parser("replay", help="Ouvre le dernier essai ou le numéro indiqué.")
     player.add_argument("number", nargs="?", type=int)
+    plan = commands.add_parser("resimuler", help="Rejoue les actions optimisées dans le moteur physique.")
+    plan.add_argument("number", type=int)
     args = parser.parse_args()
     if args.command == "replay":
         trials = _trials(REPLAY_DIR)
-        number = args.number if args.number is not None else max(trials, default=0)
-        if number not in trials:
-            parser.error(f"Essai {number} introuvable." if args.number is not None else "Aucun essai enregistré.")
+        if args.number is not None and args.number not in trials:
+            parser.error(f"Essai {args.number} introuvable.")
+        numbers = [args.number] if args.number is not None else sorted(trials, reverse=True)
         from .interface import create_window
 
-        try:
-            with trials[number].open(encoding="utf-8") as file:
-                replay = Replay(json.load(file))
-        except (OSError, ValueError, OverflowError) as error:
-            parser.error(f"Impossible de lire l'essai {number} ({error}).")
+        for number in numbers:
+            try:
+                with trials[number].open(encoding="utf-8") as file:
+                    data = json.load(file)
+                if args.number is None and isinstance(data, dict) and "score_adverse" in data:
+                    continue
+                replay = Replay(data)
+                break
+            except (OSError, ValueError, OverflowError) as error:
+                parser.error(f"Impossible de lire l'essai {number} ({error}).")
+        else:
+            parser.error("Aucun essai solo enregistré.")
         create_window(replay=replay, trial=number).mainloop()
+    elif args.command == "resimuler":
+        path = _trials(REPLAY_DIR).get(args.number)
+        if path is None:
+            parser.error(f"Essai {args.number} introuvable.")
+        try:
+            with path.open(encoding="utf-8") as file:
+                data = json.load(file)
+            if not isinstance(data, dict) or not isinstance(data.get("actions_optimisees"), list):
+                raise ValueError("Cet essai ne contient aucun plan réexécutable.")
+            replay = play_match(Simulation(), actions=data["actions_optimisees"], record_frames=False)
+        except (OSError, ValueError, OverflowError) as error:
+            parser.exit(1, f"{error}\n")
+        print(f"Essai {args.number} · {replay['score_max']} points en {replay['temps_score_max']:.6f} s.")
     else:
         collection = args.command == "collecte"
         try:

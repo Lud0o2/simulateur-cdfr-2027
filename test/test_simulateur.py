@@ -936,6 +936,18 @@ class AutomaticMatchTest(unittest.TestCase):
         self.assertTrue(place_pile(simulation, cup=4, x=850, y=1000, angle=pi / 2))
         self.assertEqual(simulation.score, 16)
 
+    def test_action_plan_can_release_two_piles_at_one_stop(self):
+        simulation = Simulation()
+        replay = play_match(simulation, actions=(
+            ("take", 0, 5), ("take", 8, 6), ("take", 1, 1),
+            ("drop_pair", 8, 250, 280, 0, 0), ("drop", 1, 250, 500, pi / 18),
+        ))
+        grouped, = (frame for frame in replay["frames"] if frame["action"].startswith("Dépôt groupé "))
+        self.assertEqual(grouped["score"], 11)
+        self.assertEqual(sum(enabled for _, enabled in grouped["cups"]), 1)
+        self.assertIsNone(simulation.held_pile(5))
+        self.assertIsNone(simulation.held_pile(6))
+
     def test_strategy_can_fill_all_four_cups(self):
         blocks = tuple(START_BLOCKS[i] for i in (0, 4, 6, 8))
         replay = play_match(Simulation(blocks=blocks), batches=True)

@@ -8,24 +8,29 @@ Depuis la racine, avec [les dépendances](#commandes-principales) et [le tapis](
 
 | Action | Commande |
 | --- | --- |
-| Entraîner et regarder le meilleur réseau en boucle | `python -B -m src.neat` |
+| Entraîner en continu et regarder le meilleur réseau en boucle | `python -B -m src.neat live` |
 | Entraîner 10 générations en arrière-plan, sans fenêtre | `python -B -m src.neat train --generations 10` |
-| Rejouer le dernier champion sauvegardé | `python -B -m src.neat replay` |
+| Ouvrir le dernier replay solo enregistré dans `replays/` | `python -B -m src.match replay` |
+| Rejouer le dernier champion solo avec son schéma NEAT | `python -B -m src.neat replay` |
 | Resimuler le génome sauvegardé et vérifier toutes les images du match | `python -B -m src.neat verify` |
 
-La fenêtre s’ouvre en plein écran avec le terrain au centre. À gauche, le panneau affiche la génération, le temps écoulé, le nombre de simulations et leur débit, le record, les courbes de score et de temps des 30 dernières générations et le schéma du champion. À droite, seuls les logs défilent. **Arrêter et sauvegarder** termine les évaluations lancées et enregistre les poids et le replay du meilleur réseau dans `champion.json`.
+La fenêtre s’ouvre en plein écran avec le terrain au centre. À gauche, le panneau affiche la génération, le temps écoulé, le nombre de simulations et leur débit, le record, les courbes de score et de temps des 30 dernières générations et le schéma du champion. À droite, seuls les logs défilent. **Arrêter et sauvegarder** termine les évaluations lancées et sauvegarde le meilleur réseau qualifié. Chaque sauvegarde de champion ajoute un replay numéroté dans `replays/`. Le nom du fichier indique le score maximal et le temps auquel il a été atteint pour la première fois. Le journal donne le numéro à passer à la commande, par exemple `python -B -m src.match replay 12`.
 
 Le replay a ses propres commandes. Il tourne en boucle à ×1 par défaut et charge le nouveau record au prochain départ. L’affichage saute l’attente finale si le terrain et le score sont identiques au buzzer. Le fichier représente le match complet de 100 secondes. Le tracé sur le tapis montre les dernières positions réellement parcourues et la cible du segment en cours. Le mode **Agrandir** affiche toutes les connexions du réseau.
 
-La population par défaut est de 200 individus. L’option `--population` permet de la régler. L’entraînement en direct se poursuit jusqu’à la fermeture par défaut. `--generations 5` fixe un budget et `--generations 0` lance un entraînement continu. `--seed 2027` fixe la graine, tirée au hasard sinon. `--sigma` règle l’amplitude des mutations de poids et de biais, `--add-node` et `--add-link` les probabilités de mutation de structure. Après trois générations sans record, l’amplitude augmente, jusqu’à trois fois sa valeur initiale. Elle revient à sa valeur initiale quand un record est amélioré.
+La population par défaut est de 200 individus. L’option `--population` permet de la régler. L’entraînement en direct se poursuit jusqu’à la fermeture par défaut. `--generations 5` fixe un budget et `--generations 0` lance un entraînement continu. `--seed 2027` fixe la graine, tirée au hasard sinon. `--sigma` règle l’amplitude des mutations. Elle vaut 0,28 à l’initialisation par défaut et la base des mutations des descendants vaut 1,5 fois cette valeur, soit 0,42. Chaque mutation de descendant applique un facteur tiré parmi 0,5, 1 et 2.
 
-Chaque session conserve son champion et son replay dans `neat/<session>/champion.json`, et les résultats de chaque génération dans `generations.jsonl`. Les fichiers contiennent la graine, les paramètres du champion et son résultat sur la table officielle fixe. Indique `--directory "neat/<session>"` pour relire ou vérifier une session précise. `--from-genome "neat/<session>/champion.json"` initialise une nouvelle population autour d’un champion déjà entraîné.
+Pour chaque descendant muté, `--add-node` règle la probabilité d’ajouter un neurone (40 % par défaut) et `--add-link` celle d’ajouter une connexion supplémentaire (50 % par défaut). Les deux tirages sont indépendants. Un descendant peut recevoir les deux ajouts si son graphe le permet.
+
+Chaque session enregistre ses résultats dans `neat/<session>/generations.jsonl`. Dès qu’un réseau se qualifie, `champion.json` conserve le meilleur génome, les paramètres, la graine et la trace du match pour `verify`. Pour choisir une session précise avec `src.neat replay` ou `verify`, indique `--directory "neat/<session>"`. `--from-genome "neat/<session>/champion.json"` initialise une nouvelle population autour d’un champion déjà entraîné.
 
 Le réseau évalue chaque candidat à partir de 20 observations, dont la pose et la charge du robot, le temps et le stock restants, le score courant, la durée estimée, le gain du dépôt et la pose visée. Il choisit la pile et la ventouse, la fin du chargement ou le retour, puis l’ordre et la pose des dépôts. Le planificateur vérifie les trajets. L’expérience utilise 24 poses réparties sur les cinq remparts, y compris des poses décalées déjà essayées avec la stratégie de référence.
 
-La fitness compare `(points maximum, −temps du premier maximum)` dans un match de 100 s. Les points sont relevés lors des prises et dépôts et sur les pas de déplacement du match de 50 ms. Le bonus de retour est acquis quand le robot termine à l’arrêt dans la salle du trône et y reste jusqu’au buzzer. L’évaluation se fait sans fenêtre dans des processus séparés. Un nouveau record est resimulé séparément pour produire le replay et vérifier le score et son horodatage.
+Un réseau doit atteindre **65 points** pendant le match de 100 s pour se qualifier au classement. Les qualifiés sont classés par temps au premier passage à 65 points. Le champion de la session est le plus rapide. Les points sont relevés lors des prises et dépôts et sur les pas de déplacement du match de 50 ms. Le bonus de retour est acquis quand le robot termine à l’arrêt dans la salle du trône et y reste jusqu’au buzzer. L’évaluation se fait sans fenêtre dans des processus séparés. Un nouveau record est resimulé pour produire le replay et vérifier son score et son temps.
 
-Comme [Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT), l’entraînement garde une élite, fait un tirage pondéré des parents et peut scinder ou ajouter des connexions. Le tirage pondère le rang lexicographique pour préserver la priorité du score. Le graphe impose un ordre acyclique, avec au plus 12 neurones cachés et 120 connexions. Une fraction de la population repart de nouveaux poids à chaque génération pour explorer d’autres stratégies. [Sélection de Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT/blob/main/src/user/training/evolver.hpp) · [Mutations de Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT/blob/main/src/user/common/neat/mutator.hpp)
+**10 %** de la génération suivante reçoivent de nouveaux poids tirés autour de l’amorce. Un quart des autres parents est tiré uniformément dans une archive en mémoire qui contient jusqu’à 128 stratégies ayant atteint 65 points. L’archive garde le réseau le plus rapide par suite de prises, de dépôts et de fins de série. Pour chaque autre descendant, trois participants sont tirés au hasard dans la génération et le meilleur devient parent, selon le score puis le temps. Ce tournoi fournit tous les parents quand l’archive est vide. Tous les réseaux de la nouvelle génération sont mutés et évalués. Pour partir d’un résultat connu, indique un champion à 65 points avec `--from-genome`.
+
+Lors d’une mutation, chaque poids de connexion a 1 % de chances d’être remplacé par une valeur tirée uniformément entre −1 et 1. Les mutations de structure inspirées de [Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT) peuvent scinder ou ajouter des connexions. Le graphe impose un ordre acyclique, avec au plus 12 neurones cachés et 120 connexions.
 
 ### Mesures du 16 novembre 2026
 
@@ -37,7 +42,44 @@ Comme [Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT), l’entraîn
 
 La population sans amorce est passée de 50 à 55 points. Son champion dépose les dix piles, puis reste bloqué à l’extérieur de la salle du trône. Le réseau d’amorce a été ajusté aux 22 décisions du match de référence. La série amorcée a égalé le record dès la première génération, avec un débit de 1,65 simulation/s sur sept processus sans fenêtre. Les deux replays ont été reproduits image par image avec `verify`.
 
-Avec `python -B -m src.neat train --population 200 --generations 2 --seed 2027` sur sept processus, le débit est passé de 0,959 simulation/s sur `0d220d6` à 1,064 après mutualisation des calculs de dépôt, mise en cache du score et production du replay en parallèle de la génération suivante. Le lot de 384 évaluations a pris 400,28 s puis 360,85 s, sauvegardes comprises. Les 384 scores et temps sont identiques, ainsi que les 2 327 images des deux replays gagnants.
+Avant la sélection à 65 points, `python -B -m src.neat train --population 200 --generations 2 --seed 2027` sur sept processus est passé de 0,959 simulation/s sur `0d220d6` à 1,064 après mutualisation des calculs de dépôt, mise en cache du score et production du replay en parallèle de la génération suivante. Le lot de 384 évaluations a pris 400,28 s puis 360,85 s, sauvegardes comprises. Les 384 scores et temps sont identiques, ainsi que les 2 327 images des deux replays gagnants.
+
+### Recherche de stratégies à 65 points du 16 novembre 2026
+
+Cinq fenêtres de 300 s, avec 40 individus, sept processus, la graine 2027 et le champion de départ `neat/20261116-045917-ary3rfkl/champion.json` à 65 points en 52,69 s. Chaque ligne ajoute un changement à la précédente. Une nouvelle stratégie diffère du départ et des précédentes par la suite des actions réussies, avec la ventouse, la pile en prise et la pose en dépôt. La mesure inclut les fins de série et utilise l’angle de dépôt modulo 180°.
+
+| Essai | Matchs | Matchs à 65 | Nouvelles stratégies | Nouvelles par minute | Meilleure nouvelle |
+| --- | ---: | ---: | ---: | --- | ---: |
+| 1. Tirage uniforme | 1 026 | 22 | 3 | 3 / 0 / 0 / 0 / 0 | 55,20 s |
+| 2. Tournoi à deux | 935 | 42 | 10 | 8 / 0 / 0 / 2 / 0 | 55,04 s |
+| 3. Amplitude de base fixe à 0,28 | 898 | 56 | 15 | 8 / 3 / 0 / 1 / 3 | 55,04 s |
+| 4. Archive pour un quart des parents | 921 | 173 | 28 | 8 / 2 / 6 / 5 / 7 | 52,88 s |
+| 5. Amplitude des descendants à 0,42 | 875 | 146 | 29 | 9 / 7 / 4 / 3 / 6 | 55,04 s |
+
+L’essai 5 avait été retenu à l’issue de la première série pour son nombre de nouvelles stratégies. Les essais 4 et 5 qualifient au moins un réseau par génération complète et trouvent des solutions pendant chacune des cinq minutes. Le record de départ reste à 52,69 s. Le replay local `python -B -m src.match replay 32` montre la nouvelle stratégie la plus rapide, issue de l’essai 4.
+
+Les essais 6 à 10 reprennent l’essai 5 et modifient chacun un seul réglage. Seuls les matchs dont le résultat est reçu pendant les 300 secondes comptent. L’unicité des stratégies est calculée dans chaque essai, puis sur l’ensemble de la deuxième série.
+
+| Essai | Matchs | Matchs à 65 | Nouvelles stratégies | Nouvelles par minute | Meilleure nouvelle |
+| --- | ---: | ---: | ---: | --- | ---: |
+| 6. Parents tirés dans l’archive à 50 % | 862 | 153 | 20 | 5 / 4 / 7 / 1 / 3 | 52,88 s |
+| 7. Perturbation des poids hors connexions directes des entrées communes aux actions | 809 | 117 | 22 | 9 / 6 / 2 / 1 / 4 | 52,88 s |
+| 8. Tournoi à trois | 811 | 158 | 26 | 8 / 5 / 8 / 0 / 5 | 55,04 s |
+| 9. Ajout de neurone à 20 % chez les descendants | 803 | 150 | 26 | 9 / 2 / 8 / 3 / 4 | 52,88 s |
+| 10. Nouveaux génomes à 20 % | 883 | 121 | 11 | 5 / 2 / 2 / 1 / 1 | 52,88 s |
+| **Total des essais 6 à 10** | **4 168** | **699** | **61 après dédoublonnage** | — | **52,88 s** |
+
+La deuxième série atteint 65 points dans 16,8 % des matchs (699 sur 4 168), contre 9,4 % dans la première (439 sur 4 655). Le tournoi à trois de l’essai 8 donne le meilleur taux de la deuxième série (19,5 %) et devient le réglage par défaut. L’essai 5 garde le record de 29 nouvelles stratégies en cinq minutes. La meilleure stratégie de la deuxième série reproduit le replay 32. Les deux séries utilisent une seule graine et le même champion de départ.
+
+### Recherche du meilleur temps à 65 points du 16 novembre 2026
+
+Dix essais de 600 s avec 40 individus et sept processus ont joué 12 818 matchs, dont 4 780 à 65 points. Le premier essai, avec `--sigma 0.12` et la graine 2027, a amélioré le record local de **52,64 s à 51,94 s**. Le réseau a modifié les poses de dépôt des piles 1 et 5 dans le même ordre de prises et de dépôts. Les neuf essais suivants sont repartis de ce champion et ont égalé son temps.
+
+Le replay vérifié se lance avec `python -B -m src.match replay 1`. Le génome local se recharge avec `--from-genome "neat/20261116-161113-an0tngvm/champion.json"`.
+
+Dix essais de recherche directe sur les actions ont ensuite évalué 9 257 variantes, dont 1 493 à 65 points. Le meilleur plan atteint **65 points en 36,025 s** sur la table officielle, retour complet inclus. Il parcourt 13,65 m au lieu de 17,74 m pour la référence. Il approche directement de la prise, limite la course après contact à 2 mm et laisse le trajet suivant dégager le châssis après un dépôt. Trois arrêts permettent de déposer deux piles chacun. Les vitesses, l’accélération et le barème sont conservés.
+
+Le replay local **39** contient le plan, réexécutable dans le moteur physique. Les replays **2 à 39** conservent chaque record de la campagne. Cette tournée est calculée pour la table de départ sans adversaire. Sur les mêmes points d’arrêt, les translations idéales seules demandent déjà 29,33 s. Atteindre 30 s laisse donc peu de marge pour les rotations et les détours.
 
 ## Point de reprise depuis `main`
 
@@ -76,6 +118,13 @@ python -B -m src.match replay
 ```
 
 Indique un numéro après `replay` pour ouvrir un essai précis.
+
+**Voir et resimuler le plan à 65 points en 36,025 s**
+
+```powershell
+python -B -m src.match replay 39
+python -B -m src.match resimuler 39
+```
 
 **Jouer un match de collecte**
 
