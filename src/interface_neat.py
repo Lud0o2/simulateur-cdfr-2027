@@ -2,16 +2,16 @@
 
 from collections import deque
 import json
+from multiprocessing import get_context
 from pathlib import Path
 from queue import Empty, SimpleQueue
-from threading import Event, Thread
 from time import perf_counter
 import tkinter as tk
 from tkinter import ttk
 
 from .interface import ACCENT, BACKGROUND, BORDER_COLOR, FONT, FOREGROUND, MUTED, SURFACE, WARNING, YELLOW, create_window
 from .match import Replay, _frame
-from .neat import Genome, INPUTS, N_INPUTS, new_directory, train
+from .neat import Genome, INPUTS, N_INPUTS, train_background
 from .simulateur import Simulation
 
 
@@ -67,12 +67,13 @@ def _draw_network(canvas, genome):
 
 
 class Dashboard:
-    def __init__(self, settings, directory, saved, initial=None):
+    def __init__(self, settings, directory, saved):
         self.settings = settings
         self.directory = directory
-        self.initial = initial
-        self.events = SimpleQueue()
-        self.stop, self.pause = Event(), Event()
+        self.context = get_context("spawn")
+        self.events = self.context.Queue() if settings is not None else SimpleQueue()
+        self.stop, self.pause = (self.context.Event(), self.context.Event()) if settings is not None else (None, None)
+        self.worker = None
         self.progress = {}
         self.stats = []
         self.genome = None
@@ -220,6 +221,14 @@ class Dashboard:
             if status in {"Terminé", "Erreur"}:
                 self.pause_button.state(["disabled"])
 
+    def _append_log(self, message):
+        self.log.configure(state="normal")
+        self.log.insert("end", message + "\n")
+        if int(self.log.index("end-1c").split(".")[0]) > 100:
+            self.log.delete("1.0", "2.0")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
     def poll(self):
         incoming = None
         while True:
@@ -229,12 +238,7 @@ class Dashboard:
                 break
             self.progress.update(event)
             if "log" in event:
-                self.log.configure(state="normal")
-                self.log.insert("end", event["log"] + "\n")
-                if int(self.log.index("end-1c").split(".")[0]) > 100:
-                    self.log.delete("1.0", "2.0")
-                self.log.see("end")
-                self.log.configure(state="disabled")
+                self._append_log(event["log"])
             if "stats" in event:
                 stats = event["stats"]
                 self.stats.append(stats)
@@ -257,6 +261,10 @@ class Dashboard:
                 if self.zoom is not None and self.zoom.winfo_exists():
                     _draw_network(self.zoom, self.genome)
                 incoming = data["id"], replay
+        if (self.worker is not None and self.worker.exitcode not in (None, 0)
+                and self.progress.get("status") != "Erreur"):
+            self.progress.update(status="Erreur", elapsed=perf_counter() - self.started)
+            self._append_log(f"Le processus d’entraînement s’est arrêté · code {self.worker.exitcode}")
         self._display_progress()
         return incoming
 
@@ -272,21 +280,26 @@ class Dashboard:
         self.stop.set()
         self.root.destroy()
 
-    def work(self):
-        def publish(event):
-            if "champion" in event:
-                event["replay"] = Replay(event["champion"]["replay"])
-            self.events.put(event)
+    def start(self, initial=None):
+        self.worker = self.context.Process(target=train_background, name="neat", args=(
+            self.settings, self.directory, initial, self.events, self.pause, self.stop,
+        ))
+        self.worker.start()
 
-        try:
-            directory = new_directory(self.directory)
-            train(self.settings, directory, publish, initial=self.initial, pause=self.pause, stop=self.stop)
-        except Exception as exc:
-            publish(dict(status="Erreur", elapsed=perf_counter() - self.started, log=str(exc)))
+    def join(self):
+        self.stop.set()
+        # Vider la file tant que le processus peut publier un dernier champion.
+        while self.worker.is_alive():
+            try:
+                self.events.get(timeout=0.2)
+            except Empty:
+                pass
+        self.worker.join()
+        self.events.close()
 
 
 def run_window(*, settings=None, directory: Path | None = None, saved=None, initial=None):
-    dashboard = Dashboard(settings, directory, saved, initial)
+    dashboard = Dashboard(settings, directory, saved)
     if saved is None:
         simulation = Simulation()
         replay = Replay(dict(obstacles=simulation.obstacles, frames=[_frame(simulation, "En attente du premier réseau")]))
@@ -296,10 +309,8 @@ def run_window(*, settings=None, directory: Path | None = None, saved=None, init
     if settings is None:
         root.mainloop()
         return
-    worker = Thread(target=dashboard.work, name="neat")
-    worker.start()
+    dashboard.start(initial)
     try:
         root.mainloop()
     finally:
-        dashboard.stop.set()
-        worker.join()
+        dashboard.join()

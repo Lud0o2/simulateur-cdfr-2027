@@ -2,6 +2,39 @@
 
 Le simulateur compare des stratégies de match et entraîne un réseau de neurones sur la table officielle, sans adversaire. Le réseau choisit les prises, les dépôts et le retour à la salle du trône.
 
+## Neuroévolution et replay en direct
+
+Depuis la racine, avec [les dépendances](#commandes-principales) et [le tapis](#source-du-tapis) installés.
+
+| Action | Commande |
+| --- | --- |
+| Entraîner et regarder le meilleur réseau en boucle | `python -B -m src.neat` |
+| Entraîner 10 générations en arrière-plan, sans fenêtre | `python -B -m src.neat train --population 100 --generations 10` |
+| Rejouer le dernier champion sauvegardé | `python -B -m src.neat replay` |
+| Resimuler le génome sauvegardé et vérifier toutes les images du match | `python -B -m src.neat verify` |
+
+La fenêtre ouvre le terrain en plein écran. Le panneau de gauche permet de mettre l’entraînement en pause et affiche le débit, les statistiques des générations et le schéma du champion. Le replay a ses propres commandes. Il tourne en boucle à ×1 par défaut et charge le nouveau record au prochain départ. Le tracé sur le tapis montre les dernières positions réellement parcourues et la cible du segment en cours. Le mode **Agrandir** affiche toutes les connexions du réseau.
+
+Par défaut, l’entraînement en direct se poursuit jusqu’à la fermeture. `--generations 5` fixe un budget et `--generations 0` lance un entraînement continu. `--seed 2027` fixe la graine, tirée au hasard sinon. `--sigma` règle l’amplitude des mutations de poids et de biais, `--add-node` et `--add-link` les probabilités de mutation de structure. Après trois générations sans record, l’amplitude augmente, jusqu’à trois fois sa valeur initiale. Elle revient à sa valeur initiale quand un record est amélioré.
+
+Chaque session conserve son champion et son replay dans `neat/<session>/champion.json`, et les résultats de chaque génération dans `generations.jsonl`. Les fichiers contiennent la graine, les paramètres du champion et son résultat sur la table officielle fixe. Indique `--directory "neat/<session>"` pour relire ou vérifier une session précise. `--from-genome "neat/<session>/champion.json"` initialise une nouvelle population autour d’un champion déjà entraîné.
+
+Le réseau évalue chaque candidat à partir de 20 observations, dont la pose et la charge du robot, le temps et le stock restants, le score courant, la durée estimée, le gain du dépôt et la pose visée. Il choisit la pile et la ventouse, la fin du chargement ou le retour, puis l’ordre et la pose des dépôts. Le planificateur vérifie les trajets. L’expérience utilise 24 poses réparties sur les cinq remparts, y compris des poses décalées déjà essayées avec la stratégie de référence.
+
+La fitness compare `(points maximum, −temps du premier maximum)` dans un match de 100 s. Les points sont relevés lors des prises et dépôts et sur les pas de déplacement du match de 50 ms. Le bonus de retour est acquis quand le robot termine à l’arrêt dans la salle du trône et y reste jusqu’au buzzer. L’évaluation se fait sans fenêtre dans des processus séparés. Un nouveau record est resimulé séparément pour produire le replay et vérifier le score et son horodatage.
+
+Comme [Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT), l’entraînement garde une élite, fait un tirage pondéré des parents et peut scinder ou ajouter des connexions. Le tirage pondère le rang lexicographique pour préserver la priorité du score. Le graphe impose un ordre acyclique, avec au plus 12 neurones cachés et 120 connexions. Une fraction de la population repart de nouveaux poids à chaque génération pour explorer d’autres stratégies. [Sélection de Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT/blob/main/src/user/training/evolver.hpp) · [Mutations de Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT/blob/main/src/user/common/neat/mutator.hpp)
+
+### Mesures du 16 novembre 2026
+
+| Stratégie sur la table officielle | Générations / évaluations | Record |
+| --- | ---: | ---: |
+| Construction de référence (`reseau.npz`) | — | 65 points en 67,14 s |
+| NEAT sans amorce, 36 individus, graine 2027 | 8 / 267 | 55 points en 60,55 s |
+| NEAT amorcé sur les décisions de la référence, 40 individus, graine 411 | 8 / 299 | 65 points en 67,14 s |
+
+La population sans amorce est passée de 50 à 55 points. Son champion dépose les dix piles, puis reste bloqué à l’extérieur de la salle du trône. Le réseau d’amorce a été ajusté aux 22 décisions du match de référence. La série amorcée a égalé le record dès la première génération, avec un débit de 1,65 simulation/s sur sept processus sans fenêtre. Les deux replays ont été reproduits image par image avec `verify`.
+
 ## Point de reprise depuis `main`
 
 - `codex/opti-take-main` repart du commit `55d5e1a` de `main`. La base fournit le pilotage manuel du robot holonome, la physique des piles, quatre ventouses, la planification A*, les actions de prise et de dépose, les matchs de construction et leur replay. Les 73 tests de cette base passent.

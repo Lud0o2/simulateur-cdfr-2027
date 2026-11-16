@@ -391,6 +391,20 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
     return champion
 
 
+def train_background(settings, directory, initial, events, pause, stop):
+    started = perf_counter()
+
+    def publish(event):
+        if "champion" in event:
+            event["replay"] = Replay(event["champion"]["replay"])
+        events.put(event)
+
+    try:
+        train(settings, new_directory(directory), publish, initial=initial, pause=pause, stop=stop)
+    except Exception as exc:
+        publish(dict(status="Erreur", elapsed=perf_counter() - started, log=str(exc)))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Neuroévolution du robot CDFR")
     parser.add_argument("mode", nargs="?", choices=("live", "train", "replay", "verify"), default="live")
