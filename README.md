@@ -67,13 +67,13 @@ Chaque lancement de l’entraînement de collecte tire une graine aléatoire et 
 
 Le 15 novembre 2026, avec six ventouses et 64 matchs d’entraînement (graine 7), le réseau a ramené **10 piles en 26,88 s** sur la table officielle, en deux décharges de six et quatre piles (replay local `7`). Avec quatre ventouses, il avait ramené les dix piles en **30,82 s** après 100 matchs (replay `6`).
 
-**Reprendre les poids sauvegardés et jouer 100 matchs d’entraînement**
+**Lancer un battle royale de construction avec 50 réseaux**
 
 ```powershell
-python -B -m src.reseau train --resume --matches 100
+python -B -m src.reseau train
 ```
 
-Pour entraîner un nouveau réseau dans un fichier distinct, choisis un nom de fichier encore libre avec `python -B -m src.reseau --model reseau-nouveau.npz train`.
+Pour partir avec un fichier de records distinct, choisis un nom de fichier encore libre avec `python -B -m src.reseau --model reseau-nouveau.npz train`.
 
 **Comparer le réseau sauvegardé à la stratégie de référence**
 
@@ -219,37 +219,23 @@ La stratégie multi-piles propose d’abord les prises aux trajets les plus cour
 
 Elle classe les dépôts par gain immédiat, durée estimée et dégagement du passage central. Le robot peut aborder chaque dépôt dans les deux sens. Les cercles sont réservés aux futures actions de tour. Des piles peuvent rester en charge si les remparts deviennent inaccessibles. [Règlement Eurobot 2027, § D.4 et plan G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
 
-#### Entraînement et validation
+#### Battle royale de construction
 
-Le réseau **97 → 16 → 8 → 1** a **1 713 paramètres**. Il reçoit l’état du match et une action candidate, puis estime les points que cette action et la suite du match peuvent rapporter. Une pile est en carrière si elle est libre et si son centre se trouve dans un stock officiel. L’occupation des remparts est divisée par cinq. L’indice 84 donne une distance divisée par la diagonale de la table (environ 3 606 mm). Il utilise le trajet planifié pour une prise et la distance directe jusqu’à la pose du châssis pour classer les dépôts. Le simulateur calcule le trajet complet pour les dépôts essayés. La distance vaut −1 si la prise ou la pose finale est invalide et 0 pour l’action d’arrêt du chargement ou de retour. Les indices 85 à 88 décrivent la pose visée. Les poids à 96 entrées restent rechargeables. Les nouvelles entrées de stock et de distance commencent avec des poids nuls et sont apprises lors des entraînements suivants.
+Un réseau de construction neuf **97 → 32 → 16 → 1** a **3 681 paramètres**. Il reçoit l’état du match et une action candidate, puis renvoie une valeur qui sert à classer les actions. Une pile est en carrière si elle est libre et si son centre se trouve dans un stock officiel. L’occupation des remparts est divisée par cinq. L’indice 84 donne une distance divisée par la diagonale de la table (environ 3 606 mm). Il utilise le trajet planifié pour une prise et la distance directe jusqu’à la pose du châssis pour classer les dépôts. Le simulateur calcule le trajet complet pour les dépôts essayés. La distance vaut −1 si la prise ou la pose finale est invalide et 0 pour l’action d’arrêt du chargement ou de retour. Les indices 85 à 88 décrivent la pose visée. Les anciens poids à 96 entrées et les réseaux à couches cachées élargies restent rechargeables.
 
-L’entraînement alterne la stratégie multi-piles, l’exploration et les décisions du réseau. Chaque match démarre avec les dix piles centrées sur leurs zones de stockage, aux emplacements du plan G.1. La graine fait varier les décisions explorées. Le réseau classe jusqu’à huit prises et tous les dépôts proposés, avec les deux sens d’approche de chaque rempart. Dès la première prise, il peut arrêter de charger et commencer à déposer. À vide, il peut choisir de rentrer et de terminer. Pour chaque décision, il apprend les points marqués d’ici la fin du match, retour compris. Les points tardifs ont le même poids que les points immédiats. Finir plus vite ajoute au plus l’équivalent d’un demi-point aux cibles d’apprentissage. [Règlement Eurobot 2027, plan G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
+Chaque match repart des dix piles centrées sur leurs zones de stockage sur la table officielle. Le réseau classe jusqu’à huit prises et tous les dépôts proposés, avec les deux sens d’approche de chaque rempart. Dès la première prise, il peut arrêter de charger et commencer à déposer. À vide, il peut choisir de rentrer et de terminer. [Règlement Eurobot 2027, plan G.1](https://www.eurobot.org/wp-content/uploads/2026/10/Eurobot2027_Rules_FR.pdf)
 
-`train --resume` repart des poids de `reseau.npz`. Lors des matchs guidés en reprise, le réseau explore une autre action dans 30 % des décisions, parmi les choix du deuxième au cinquième rang. Quand le robot est chargé, une place est réservée à la prise la plus rapide vers une autre pile. Le taux d’apprentissage est de 0,005 en reprise et de 0,01 avec une nouvelle initialisation.
+1. Le tournoi joue un match avec chacun des **50 réseaux initialisés aléatoirement**.
+2. À chaque manche, chaque survivant produit **dix mutants** à partir des mêmes poids et poses de départ. Chaque mutation perturbe les poids ou ajuste une pose de dépôt. Le meilleur des onze reste en lice, classé par points puis par temps. À égalité complète, le parent garde sa place.
+3. Le réseau qui obtient la plus petite valeur de **points − temps / 2** est éliminé. Le temps est mesuré en secondes. À valeur égale, le réseau qui a le moins de points sort. Il reste un gagnant après **49 manches**, après **490 essais de mutation** sur sa lignée.
 
-Un match d’entraînement sur huit choisit ses actions au hasard parmi toutes les prises accessibles et tous les dépôts proposés. Il poursuit la construction tant qu’une prise reste accessible à vide. Pour chaque ouverture, définie par les deux premières piles prises, l’entraînement conserve les décisions et les récompenses du meilleur match qui a marqué des points de construction. Les candidats réutilisent aussi des exemples tirés de cette mémoire. En fin d’entraînement à durée fixe, `reseau.npz` conserve cette mémoire et le nombre de matchs joués, même quand le meilleur réseau reste le même. Avec `--resume`, les tirages et la fréquence des matchs aléatoires tiennent compte des sessions précédentes.
+Les matchs sont répartis entre les processus disponibles. Après les matchs de départ, le simulateur rejoue seulement les mutants et réutilise les résultats des parents. Un tournoi complet compte **12 790 matchs de classement**, auxquels s’ajoutent les replays et la validation éventuelle du champion déjà sauvegardé. Les poses évoluent dans un rayon de 200 mm autour du centre du rempart, avec des angles au pas de 10°.
 
-Pour chaque match d’entraînement, un candidat supplémentaire modifie la position ou l’angle de la pose enregistrée d’un rempart. Le centre de la pile peut se trouver jusqu’à 200 mm du centre du rempart. Les angles suivent les pas de 10° de l’étape 6. Un match autonome évalue chaque mutation avec les mêmes contrôles de trajet, de collisions et de zone. Seule une amélioration du score, ou du temps à score égal, permet de conserver la mutation. Le fichier `reseau.npz` contient les poids et les poses retenues, avec `drop_offsets` pour les décalages en millimètres et `drop_angles` pour les rotations en radians. En match multi-piles, les anciens angles sont ramenés au pas le plus proche. Un ancien fichier sans `drop_angles` retrouve une pose alignée sur chaque rempart.
+Le fichier `reseau.npz` contient le record global, ses poids et ses poses. Si ce fichier existe, son modèle est rejoué comme référence au début. À chaque nouveau record, le programme affiche `Record` et sauvegarde le modèle ainsi qu’un replay dans `replays/`. La fin affiche le replay du meilleur résultat conservé. Ouvre-le avec `python -B -m src.match replay` ou en ajoutant son numéro.
 
-L’entraînement choisit automatiquement le nombre de processus selon les cœurs logiques disponibles et la taille des lots. Les matchs d’une génération partent du meilleur réseau validé jusque-là. Un candidat privilégie la meilleure trajectoire explorée du lot et les autres apprennent sur l’historique des matchs. Les candidats jouent chacun un match de validation sans exploration sur la table officielle, en parallèle. Le score prime, puis le temps simulé le plus court à score égal. À égalité complète, le meilleur réseau déjà validé garde sa place. Le gagnant sert de point de départ à la génération suivante.
+`train --endless` enchaîne les tournois jusqu’à `Ctrl+C`. Chaque tournoi crée 50 nouveaux réseaux et compare leurs résultats au record global. Chaque lancement tire une graine au hasard et l’affiche. Le replay indique la graine de la session. Utilise `--seed` suivi de la graine affichée pour reproduire les tirages.
 
-En fin de session, `train` affiche le meilleur résultat autonome et sauvegarde son replay. Si le modèle déjà sur disque obtient un meilleur résultat, ses poids sont conservés. Ouvre le replay de la session avec `python -B -m src.match replay` ou son numéro.
-
-#### Entraînement en boucle
-
-Le mode `--endless` démarre avec des poids aléatoires. Avec `--resume`, seule la première série repart du fichier de poids. Quand le nombre de matchs sans améliorer le record autonome de la série atteint `PROGRESS_WINDOW`, le programme change de graine et recrée un réseau avec des poids aléatoires, une mémoire vide et les poses de dépôt par défaut. `python -B -m src.reseau train --help` indique le seuil actuel.
-
-`reseau.npz` est mis à jour à chaque amélioration du meilleur réseau sauvegardé. `Ctrl+C` termine la session, affiche son meilleur résultat autonome toutes séries confondues et sauvegarde son replay, au format `essai-0042-53pts-42.19s.json`.
-
-Le 14 novembre 2026, un essai de **24 matchs d’entraînement** avec la graine 8 a pris **17,9 s** sur 8 processus, dont **11,9 s** pour les matchs d’entraînement. La validation finale a joué 6 matchs, contre 75 avec la validation après chaque mise à jour. Les poids d’origine ont été conservés lors de cet essai.
-
-Le 14 novembre 2026, la réutilisation des poses et des zones de score a ramené le temps médian pour **24 simulations à poids fixes** de **22,76 s à 17,09 s** sur 8 processus déjà lancés. Les deux versions ont produit les mêmes replays et les mêmes données d’entraînement. Cette mesure exclut la mise à jour des poids et la validation finale.
-
-Sans `--seed`, l’entraînement utilise la graine `7`. Passe `--seed` avec un autre entier pour changer la suite des tirages. La graine utilisée figure dans le replay.
-
-Le 14 novembre 2026, une reprise de 24 matchs avec mutations et validations sur huit processus a pris **19,91 s au lieu de 37,02 s**, à poids de départ et graines identiques. Les replays sauvegardés et le modèle final étaient identiques dans cet essai.
-
-`compare` recharge les poids, joue le réseau sans exploration et la référence de l’étape 4 sur la même table officielle, affiche leurs scores et leurs durées, puis garde le replay du réseau. L’option `--model` avant la sous-commande choisit le fichier de poids.
+`compare` recharge les poids, joue le réseau et la référence de l’étape 4 sur la même table officielle, affiche leurs scores et leurs durées, puis garde le replay du réseau. L’option `--model` avant la sous-commande choisit le fichier de poids.
 
 ### 6. Plusieurs dépôts par zone
 

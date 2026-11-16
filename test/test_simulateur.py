@@ -16,8 +16,8 @@ from src.match import (
     _pickup_approach, _return_home, _route, place_pile, play_collection, play_match, save_replay, take_pile,
 )
 from src.reseau import (
-    ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, EXPLORATION_INTERVAL, LAYERS, PROGRESS_WINDOW, TABLE_DIAGONAL,
-    MatchPolicy, Network, _mutate_drop_pose, _replay_rank, features, train_matches,
+    ACTION_DISTANCE, CENTERED_OFFSETS, DROP_OFFSET_LIMIT, LAYERS, TABLE_DIAGONAL,
+    MatchPolicy, Network, _battle_royale, _mutate_drop_pose, _mutate_weights, _replay_rank, features, main as reseau_main,
 )
 from src.simulateur import (
     START, START_BLOCKS, THRONE_ROOM, TOWER_CENTERS, TURN_STEP, RobotGeometry, Simulation, load_robot,
@@ -42,152 +42,113 @@ two_pile_simulation = partial(
 
 
 class TrainingReplayTest(unittest.TestCase):
-    def test_random_match_explores_past_the_eight_fastest_pickups(self):
-        policy = MatchPolicy(object(), rng=np.random.default_rng(7), random_match=True)
-        choices = [(1 + pile, pile, 1) for pile in range(10)]
-        simulation = Simulation()
-        selected = set()
-        for _ in range(40):
-            ordered = policy.order(simulation, {}, choices, pickup=True, can_finish=True)
-            self.assertCountEqual(ordered, choices)
-            selected.add(ordered[0][1])
-        self.assertIn(9, selected)
+    def test_battle_royale_draws_a_seed_per_launch_and_accepts_zero(self):
+        with (patch("src.reseau.randbits", side_effect=(100, 200)) as draw,
+              patch("src.reseau._train_battle_royale") as train):
+            for options in ([], ["--endless"], ["--seed", "0"]):
+                with patch("sys.argv", ["reseau", "train", *options]):
+                    reseau_main()
+        self.assertEqual([call.args for call in draw.call_args_list], [(32,), (32,)])
+        self.assertEqual([call.args[0] for call in train.call_args_list], [100, 200, 0])
 
-    def test_keeps_and_reuses_an_opening_below_the_record_after_reloading(self):
+    def test_battle_royale_tests_50_networks_then_ten_mutants_per_survivor(self):
+        batches = []
+
+        def evaluate(_simulate, candidates):
+            if not batches:
+                self.assertEqual(len({network.weights[0].tobytes() for network in candidates}), 50)
+            batches.append(len(candidates))
+            return [(10, -1)] * len(candidates)
+
+        with patch("builtins.print") as output:
+            winner = _battle_royale(np.random.default_rng(7), evaluate, lambda *_: None)
+        self.assertEqual(batches, [50, *range(500, 10, -10)])
+        self.assertEqual(sum(batches), 12_790)
+        self.assertEqual(output.call_count, 49)
+        self.assertEqual(winner, (10, -1))
+
+    def test_battle_royale_keeps_better_parents_and_saves_every_record(self):
+        rng = np.random.default_rng(7)
+        networks = [Network(rng) for _ in range(9)]
+        for index, network in enumerate(networks):
+            network.biases[-1][0] = index
+        scores = [(20, 30), (20, 25), (18, 10), (19, 5), (20, 25), (22, 35), (20, 19), (22, 34), (21, 32)]
+        groups = [[0] * 9 + [3], [1] * 9 + [4], [8] + [2] * 8 + [5], [1] * 9 + [7], [0] * 9 + [6]]
+        mutations = (networks[index] for group in groups for index in group)
+        parents = []
+        official_blocks = Simulation().blocks
+
+        def mutate(network, _rng):
+            parents.append(int(network.biases[-1][0]))
+            return next(mutations)
+
+        def play(simulation, *, policy, record_frames=True):
+            self.assertEqual(simulation.blocks, official_blocks)
+            index = int(policy.network.biases[-1][0])
+            score, duration = scores[index]
+            return {"score": score, "duree": duration, "frames": [index] if record_frames else []}
+
+        with (TemporaryDirectory() as directory, patch("src.reseau.BATTLE_SIZE", 3),
+              patch("src.reseau._training_workers", return_value=1),
+              patch("src.reseau.Network", side_effect=[*networks[:3], KeyboardInterrupt]),
+              patch("src.reseau._mutate_contender", side_effect=mutate), patch("src.reseau.play_match", side_effect=play),
+              patch("src.reseau.save_replay", side_effect=partial(save_replay, directory=Path(directory))),
+              patch("src.reseau.completion_beep"), patch("builtins.print") as output):
+            model = Path(directory) / "reseau.npz"
+            with patch("sys.argv", ["reseau", "--model", str(model), "train", "--endless"]):
+                reseau_main()
+            replays = sorted(Path(directory).glob("essai-*.json"))
+            records = [json.loads(path.read_text(encoding="utf-8")) for path in replays]
+            with np.load(model, allow_pickle=False) as data:
+                self.assertEqual(data["arr_5"][0], 7)
+
+        self.assertEqual(parents, [parent for parent in (0, 1, 2, 1, 0) for _ in range(10)])
+        self.assertEqual([replay["frames"][0] for replay in records], [0, 1, 8, 5, 7])
+        self.assertEqual([_replay_rank(replay) for replay in records],
+                         [(20, -30), (20, -25), (21, -32), (22, -35), (22, -34)])
+        lines = [call.args[0] for call in output.call_args_list]
+        self.assertEqual(sum(line.startswith("Record ·") for line in lines), 5)
+        self.assertIn("Manche 1/2 · éliminé 22 pts en 35.00 s"
+                      " · points − temps/2 = 4.50 · 2 en lice · tête 20 pts en 25.00 s", lines)
+        self.assertIn("Vainqueur du tournoi 1 · 20 pts en 19.00 s", lines)
+        self.assertIn("Tournoi 2 · évaluation des 3 réseaux de départ", lines)
+        self.assertIn("Tournoi interrompu.", lines)
+        self.assertEqual(lines[-1], "Session · 22 points en 34.00 s · replay 5")
+
+    def test_battle_royale_replays_the_saved_champion_if_the_entrants_lose(self):
         incumbent = Network(np.random.default_rng(7))
-        exploration_modes = []
-        remembered = np.full(LAYERS[0], 2, dtype=np.float32)
+        incumbent.biases[-1][0] = 10
 
         def play(_simulation, *, policy, record_frames=True):
-            if policy.rng is None:
-                return {"score": 50, "duree": 20}
-            if not record_frames:
-                exploration_modes.append(policy.random_match)
-            if policy.random_match:
-                policy.history.append((remembered, 0))
-                return {"score": 42, "duree": 25, "ouverture": (4, 1)}
-            policy.history.append((np.zeros(LAYERS[0], dtype=np.float32), 0))
-            return {"score": 48, "duree": 21}
+            duration = 19.96 if policy.network.biases[-1][0] == 10 else 24.31
+            return {"score": 50, "duree": duration, "frames": [duration] if record_frames else []}
 
-        with (patch("src.reseau.play_match", side_effect=play),
-              patch("src.reseau.os.process_cpu_count", return_value=1, create=True),
-              patch.object(Network, "train") as train,
-              TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory):
-            best, _ = train_matches(8, 7, incumbent, resume=True)
-            self.assertIs(best, incumbent)
-            self.assertEqual(exploration_modes, [False] * 7 + [True])
-            path = Path(directory) / "reseau.npz"
-            best.save(path)
-            loaded = Network.load(path)
-            self.assertEqual(loaded.experience[4, 1][0], (42, -25))
-            self.assertEqual(loaded.training_matches, 8)
-            train.reset_mock()
-            train_matches(1, 7, loaded, resume=True)
-            inputs, targets, _ = train.call_args.args
-            np.testing.assert_array_equal(inputs[-1], remembered)
-            self.assertAlmostEqual(float(targets[-1]), (42 + 0.5 * (1 - 25 / MATCH_SECONDS)) / 8)
-
-    def test_short_sessions_continue_the_random_match_schedule(self):
-        network = Network(np.random.default_rng(7))
-        total = EXPLORATION_INTERVAL * (PROGRESS_WINDOW // EXPLORATION_INTERVAL + 1)
-        network.training_matches = total - 1
-
-        def play(_simulation, *, policy, record_frames=True):
-            if policy.rng is not None:
-                self.assertTrue(policy.random_match)
-            return {"score": 50, "duree": 20}
-
-        with patch("src.reseau.play_match", side_effect=play):
-            train_matches(1, 7, network, resume=True)
-        self.assertEqual(network.training_matches, total)
-
-    def test_endless_resets_from_scratch_and_keeps_only_the_session_best(self):
-        incumbent = Network(np.random.default_rng(7))
-        incumbent.training_matches = 49
-        incumbent.biases[-1][0] = 99
-        incumbent.drop_angles = (radians(10), *incumbent.drop_angles[1:])
-        incumbent.experience[0, 1] = (50, -20), np.full((1, LAYERS[0] + 1), 42, dtype=np.float32)
-        scores = {99: (50, 20), 1: (51, 25), 0: (40, 30), 2: (50, 15)}
-        played = [0, 0]
-        series = 0
-
-        def play(_simulation, *, policy, record_frames=True):
-            nonlocal series
-            if policy.rng is None:
-                score, duration = scores[policy.network.biases[-1][0]]
-                return {"score": score, "duree": duration}
-            if played[1] == 53:
-                raise KeyboardInterrupt
-            if played[0] == 56:
-                series = 1
-            played[series] += 1
-            self.assertLessEqual(played[series], 56)
-            if series == 1 and played[1] == 1:
-                self.assertFalse(policy.resume)
-                self.assertEqual(policy.network.training_matches, 0)
-                self.assertEqual(policy.network.biases[-1][0], 0)
-                self.assertNotEqual(policy.drop_angles, incumbent.drop_angles)
-                self.assertFalse(np.array_equal(policy.network.weights[0], incumbent.weights[0]))
-            policy.history.append((np.zeros(LAYERS[0]), 0))
-            return {"score": 64, "duree": 12}
-
-        def update(network, inputs, _targets, _rng, *, learning_rate):
-            if series == 0 and played[0] >= 6:
-                network.biases[-1][0] = 1
-            if series == 1:
-                self.assertFalse((inputs == 42).any())
-                network.biases[-1][0] = 2
-
-        def save_session(replay, *, descriptive):
-            return save_replay(replay, directory=Path(directory), descriptive=descriptive)
-
-        from src.reseau import main
-
-        with (TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory,
-              patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
-              patch("src.reseau.PROGRESS_WINDOW", 50),
-              patch("src.reseau.os.process_cpu_count", return_value=3, create=True),
-              patch("src.reseau.ProcessPoolExecutor") as pool, patch("builtins.print") as output,
-              patch("src.reseau._mutate_drop_pose", wraps=_mutate_drop_pose) as mutate,
-              patch("src.reseau.save_replay", side_effect=save_session)):
-            pool.return_value.__enter__.return_value.map = map
+        with (TemporaryDirectory() as directory, patch("src.reseau.BATTLE_SIZE", 2),
+              patch("src.reseau._training_workers", return_value=1), patch("src.reseau.play_match", side_effect=play),
+              patch("src.reseau.completion_beep"), patch("builtins.print"),
+              patch("src.reseau.save_replay", return_value=(1, "1.json")) as save):
             model = Path(directory) / "reseau.npz"
             incumbent.save(model)
-            with patch("sys.argv", ["reseau", "--model", str(model), "train", "--endless", "--resume"]):
-                main()
-            self.assertEqual(Network.load(model).biases[-1][0], 1)
-            paths = sorted(Path(directory).glob("essai-*.json"))
-            replays = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+            initial = model.read_bytes()
+            with patch("sys.argv", ["reseau", "--model", str(model), "train"]):
+                reseau_main()
+            self.assertEqual(model.read_bytes(), initial)
+        save.assert_called_once()
+        self.assertEqual(save.call_args.args[0]["frames"], [19.96])
 
-        self.assertEqual(played, [56, 53])
-        self.assertEqual(mutate.call_count, sum(played))
-        self.assertEqual([path.name for path in paths], ["essai-0001-51pts-25.00s.json"])
-        self.assertEqual(replays[0]["serie"], 1)
-        self.assertEqual(_replay_rank(replays[0]), (51, -25))
-        output.assert_called_once_with("Session · 51 points en 25.00 s · replay 1", flush=True)
-
-    def test_deposit_mutations_are_kept_only_when_the_autonomous_match_improves(self):
-        incumbent = Network(np.random.default_rng(0))
-        first = _mutate_drop_pose(incumbent, np.random.default_rng(4))
-        second = _mutate_drop_pose(first, np.random.default_rng(0))
-        self.assertNotEqual(first.drop_offsets, incumbent.drop_offsets)
-        self.assertNotEqual(second.drop_angles, first.drop_angles)
-        ranks = {(incumbent.drop_offsets, incumbent.drop_angles): (50, 22.7),
-                 (first.drop_offsets, first.drop_angles): (50, 22.0),
-                 (second.drop_offsets, second.drop_angles): (49, 21.0)}
-
-        def play(_simulation, *, policy, record_frames=True):
-            score, duration = ranks[policy.drop_offsets, policy.drop_angles]
-            return {"score": score, "duree": duration}
-
-        with (patch("src.reseau.play_match", side_effect=play),
-              patch("src.reseau._mutate_drop_pose", side_effect=(first, second)) as mutate,
-              patch("src.reseau.os.process_cpu_count", return_value=1, create=True)):
-            best, winner = train_matches(2, 7, incumbent, resume=True)
-        self.assertEqual([call.args[0] for call in mutate.call_args_list], [incumbent, first])
-        self.assertIs(best, first)
-        self.assertEqual(_replay_rank(winner), (50, -22))
-        self.assertEqual(incumbent.drop_offsets, CENTERED_OFFSETS)
+    def test_weight_mutation_has_independent_arrays_and_keeps_drop_poses(self):
+        rng = np.random.default_rng(7)
+        parent = Network(rng)
+        copied = [values.copy() for values in (*parent.weights, *parent.biases)]
+        mutant = _mutate_weights(parent, rng, 0.04)
+        for original, current, changed in zip(copied, (*parent.weights, *parent.biases),
+                                               (*mutant.weights, *mutant.biases), strict=True):
+            np.testing.assert_array_equal(current, original)
+            self.assertEqual(changed.dtype, original.dtype)
+            self.assertFalse(np.array_equal(changed, original))
+            self.assertFalse(np.shares_memory(changed, current))
+        self.assertEqual(mutant.drop_offsets, parent.drop_offsets)
+        self.assertEqual(mutant.drop_angles, parent.drop_angles)
 
     def test_deposit_mutations_can_reach_200_mm_and_keep_a_single_changed_pose(self):
         network = Network(np.random.default_rng(0))
@@ -202,149 +163,6 @@ class TrainingReplayTest(unittest.TestCase):
             for angle in mutant.drop_angles:
                 self.assertAlmostEqual(angle / radians(10), round(angle / radians(10)))
         self.assertEqual(farthest, DROP_OFFSET_LIMIT)
-
-    def test_each_generation_continues_with_the_best_network_on_the_official_table(self):
-        incumbent = Network(np.random.default_rng(7))
-        incumbent.biases[-1][0] = 0
-        official_blocks = Simulation().blocks
-        scores = {0: (40, 30), 1: (48, 40), 2: (44, 20), 3: (48, 30), 4: (46, 10), 5: (48, 30), 6: (42, 15)}
-        versions = iter(range(1, 7))
-        evaluated_weights = []
-        training_weights = []
-        candidate_parents = []
-        targets = []
-        recorded_winners = []
-
-        def play(simulation, *, policy, record_frames=True):
-            self.assertEqual(simulation.blocks, official_blocks)
-            version = int(policy.network.biases[-1][0])
-            if policy.rng is not None:
-                self.assertFalse(record_frames)
-                training_weights.append(version)
-                policy.history.append((np.zeros(LAYERS[0]), 0))
-                return {"score": 64 if len(training_weights) in (2, 4) else 60,
-                        "duree": 13 if len(training_weights) == 4 else 15}
-            (recorded_winners if record_frames else evaluated_weights).append(version)
-            score, duration = scores[version]
-            return {"score": score, "duree": duration}
-
-        def update(network, _rows, rewards, _rng, *, learning_rate):
-            targets.extend(rewards)
-            candidate_parents.append(int(network.biases[-1][0]))
-            network.biases[-1][0] = next(versions)
-
-        with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
-              patch("src.reseau.os.process_cpu_count", return_value=2, create=True),
-              patch("src.reseau.ProcessPoolExecutor") as pool):
-            pool.return_value.__enter__.return_value.map = map
-            best, winner = train_matches(6, 7, incumbent, resume=True)
-        pool.assert_called_once_with(max_workers=2)
-        self.assertEqual(training_weights, [0, 0, 1, 1, 3, 3])
-        self.assertEqual(candidate_parents, training_weights)
-        self.assertEqual(best.biases[-1][0], 3)
-        self.assertEqual(incumbent.biases[-1][0], 0)
-        self.assertEqual((winner["score"], winner["duree"]), (48, 30))
-        self.assertEqual(evaluated_weights, [0, 0, 0, 1, 2, 1, 1, 3, 4, 3, 3, 5, 6])
-        self.assertEqual(recorded_winners, [3])
-        lower = (60 + 0.5 * (1 - 15 / MATCH_SECONDS)) / 8
-        high = (64 + 0.5 * (1 - 15 / MATCH_SECONDS)) / 8
-        faster = (64 + 0.5 * (1 - 13 / MATCH_SECONDS)) / 8
-        np.testing.assert_allclose(targets, [high, high, lower, faster, high, lower, faster, lower,
-                                             lower, high, lower, faster, lower, lower, lower])
-
-    def test_training_targets_favor_a_point_scored_late_over_finishing_early(self):
-        incumbent = Network(np.random.default_rng(7))
-        targets = []
-        exploration_scores = iter(((40, 1), (41, 99)))
-
-        def play(_simulation, *, policy, record_frames=True):
-            if policy.rng is None:
-                return {"score": 41, "duree": 99}
-            score, duration = next(exploration_scores)
-            policy.history.append((np.zeros(LAYERS[0]), 0))
-            if score == 41:
-                policy.history.extend((np.zeros(LAYERS[0]), 0) for _ in range(4))
-                policy.history.append((np.zeros(LAYERS[0]), 8))
-            return {"score": score, "duree": duration}
-
-        def update(_network, _rows, rewards, _rng, *, learning_rate):
-            targets.append(rewards)
-
-        with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "train", update),
-              patch("src.reseau.os.process_cpu_count", return_value=2, create=True),
-              patch("src.reseau.ProcessPoolExecutor") as pool):
-            pool.return_value.__enter__.return_value.map = map
-            train_matches(2, 7, incumbent, resume=True)
-        np.testing.assert_array_equal(targets[0][:5], [targets[0][0]] * 5)
-        self.assertAlmostEqual(float(targets[0][0] - targets[0][-1]), 1)
-        self.assertGreater(targets[0][0], targets[1][-1])
-
-    def test_validates_initial_weights_even_when_training_records_no_decisions(self):
-        incumbent = Network(np.random.default_rng(7))
-
-        def play(_simulation, *, policy, record_frames=True):
-            if policy.rng is not None:
-                return {"score": 64, "duree": 12}
-            return {"score": 32 if policy.network is incumbent else 40, "duree": 25}
-
-        with patch("src.reseau.play_match", side_effect=play):
-            best, winner = train_matches(1, 7, incumbent)
-        self.assertIsNot(best, incumbent)
-        self.assertEqual(winner["score"], 40)
-
-    def test_training_saves_one_session_replay_even_when_existing_weights_win(self):
-        incumbent = Network(np.random.default_rng(7))
-
-        def play(_simulation, *, policy, record_frames=True):
-            if policy.rng is not None:
-                duration = 22.85
-            else:
-                duration = 19.96 if policy.network is incumbent else 24.31
-            return {"score": 50, "duree": duration, "frames": [duration] if record_frames else []}
-
-        with (patch("src.reseau.play_match", side_effect=play), patch.object(Network, "load", return_value=incumbent),
-              patch.object(Network, "save") as save_model, patch("src.reseau.completion_beep"),
-              patch("src.reseau.save_replay", return_value=(51, "51.json")) as save,
-              patch("sys.argv", ["reseau", "--model", "reseau.npz", "train", "--matches", "1"]),
-              patch("builtins.print") as output):
-            from src.reseau import main
-
-            main()
-        save.assert_called_once()
-        self.assertEqual(save.call_args.args[0]["frames"], [24.31])
-        save_model.assert_called_once_with(Path("reseau.npz"))
-        self.assertEqual([call.args[0] for call in output.call_args_list], [
-            "Simulation · 1 processus pour 1 matchs d’entraînement",
-            "Session · 50 points en 24.31 s · replay 51",
-        ])
-
-    def test_resume_explores_alternatives_among_the_five_best_choices(self):
-        class RankedNetwork:
-            def predict(self, rows):
-                return np.arange(len(rows))
-
-        simulation = Simulation()
-        choices = [(1, pile, 1) for pile in range(6)]
-        expected = list(reversed(choices))
-        policy = MatchPolicy(RankedNetwork(), rng=np.random.default_rng(7), resume=True)
-        first_choices = []
-        for _ in range(100):
-            ordered = policy.order(simulation, {}, choices, pickup=True)
-            self.assertCountEqual(ordered, choices)
-            first_choices.append(ordered[0])
-        self.assertEqual(set(first_choices), set(expected[:5]))
-        self.assertIn(first_choices.count(expected[0]), range(60, 81))
-
-    def test_resume_explores_the_fastest_other_pile_while_loaded(self):
-        class RankedNetwork:
-            def predict(self, rows):
-                return np.arange(len(rows))
-
-        simulation = Simulation()
-        choices = [(1 + pile / 10, pile, 1) for pile in range(8)]
-        policy = MatchPolicy(RankedNetwork(), rng=np.random.default_rng(7), resume=True)
-        first_choices = [policy.order(simulation, {2: 9}, choices, pickup=True)[0] for _ in range(100)]
-        self.assertEqual(set(first_choices), {choices[index] for index in (0, 4, 5, 6, 7)})
 
     def test_replay_rank_prefers_score_then_total_duration(self):
         short = {"score": 40, "duree": 38}
@@ -453,6 +271,23 @@ class TrainingReplayTest(unittest.TestCase):
         rows = features(sim, {1: 0}, [(8, 1, 1, site, 0), (0, 1, 1, Vec2d(1500, 1000), 0)], pickup=False)
         self.assertAlmostEqual(rows[0, ACTION_DISTANCE], expected / TABLE_DIAGONAL)
         self.assertEqual(rows[1, ACTION_DISTANCE], -1)
+
+    def test_loading_older_checkpoints_accepts_wider_weights(self):
+        rng = np.random.default_rng(7)
+        layers = (LAYERS[0], 48, 24, LAYERS[-1])
+        network = Network(rng, layers)
+        rows = rng.random((8, LAYERS[0]), dtype=np.float32)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "reseau.npz"
+            np.savez(path, *network.weights, *network.biases, training_matches=376, adam_updates=110)
+            restored = Network.load(path)
+            self.assertEqual([values.shape for values in restored.weights], list(zip(layers, layers[1:])))
+            np.testing.assert_array_equal(restored.predict(rows), network.predict(rows))
+
+            bad_weights = (*network.weights[:-1], np.zeros((23, 1), dtype=np.float32))
+            np.savez(path, *bad_weights, *network.biases)
+            with self.assertRaisesRegex(ValueError, "Paramètres du réseau invalides"):
+                Network.load(path)
 
     def test_loading_96_input_weights_preserves_predictions_on_the_official_table(self):
         rng = np.random.default_rng(7)
@@ -1166,15 +1001,11 @@ class AutomaticMatchTest(unittest.TestCase):
         self.assertEqual(simulation.score, 11)
         self.assertEqual(replay["score_retour"], 10)
 
-    def test_network_learns_and_reloads_its_action_values(self):
+    def test_network_reloads_its_action_values(self):
         rng = np.random.default_rng(7)
         rows = features(two_pile_simulation(), {}, [(1, 0, 1), (1, 1, 2)], pickup=True)
         self.assertEqual(rows.shape, (2, 97))
         network = Network(rng)
-        targets = np.array([1.0, 0.0], dtype=np.float32)
-        initial_error = np.mean((network.predict(rows) - targets) ** 2)
-        network.train(rows, targets, rng)
-        self.assertLess(np.mean((network.predict(rows) - targets) ** 2), initial_error)
         with TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
             path = Path(folder) / "reseau.npz"
             network.save(path)

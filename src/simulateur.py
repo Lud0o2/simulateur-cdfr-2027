@@ -227,6 +227,16 @@ def arc_hits_edge(point: Point, angle: float, start: Point, end: Point) -> bool:
     return False
 
 
+@lru_cache(maxsize=16384)
+def _rotated_footprint(footprint, angle):
+    return tuple(pymunk.Vec2d(*corner).rotated(angle) for corner in footprint)
+
+
+@lru_cache(maxsize=16384)
+def _footprint_radius(footprint):
+    return max(hypot(*vertex) for vertex in footprint)
+
+
 @dataclass(frozen=True)
 class Movement:
     end: Point
@@ -271,7 +281,7 @@ class _Pile:
         return self._block
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=16384)
 def scoring_zones(block: Block) -> tuple[tuple[int, ...], bool]:
     left, top, right, bottom = _polygon_bounds(block.corners)
     # La tolérance sur les axes obliques peut dépasser CONTACT_GAP une fois projetée sur x ou y.
@@ -432,10 +442,10 @@ class Simulation:
         x, y = position
         bounded = [(polygon, _polygon_bounds(polygon)) for polygon in polygons]
         for footprint in footprints:
-            destination = tuple(pymunk.Vec2d(*vertex).rotated(angle) for vertex in footprint)
+            destination = _rotated_footprint(footprint, angle)
             if cls._turn_crosses_border(position, footprint, destination, angle):
                 return False
-            radius = max(hypot(*vertex) for vertex in footprint) + CONTACT_GAP
+            radius = _footprint_radius(footprint) + CONTACT_GAP
             for polygon, (left, top, right, bottom) in bounded:
                 if left > x + radius or right < x - radius or top > y + radius or bottom < y - radius:
                     continue
@@ -718,7 +728,7 @@ class Simulation:
         x, y = position
         if any(not (0 <= x + dx <= TABLE_WIDTH and 0 <= y + dy <= TABLE_HEIGHT) for dx, dy in destination):
             return True
-        radius = max(hypot(*vertex) for vertex in footprint)
+        radius = _footprint_radius(footprint)
         if min(x, y, TABLE_WIDTH - x, TABLE_HEIGHT - y) < radius:
             border = tuple((px - x, py - y) for px, py in TABLE)
             if any(arc_hits_edge(vertex, angle, a, b) for vertex in footprint for a, b in edges(border)):

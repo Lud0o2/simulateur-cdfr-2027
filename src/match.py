@@ -20,6 +20,7 @@ from pymunk import Vec2d
 from .simulateur import (
     CONTACT_GAP, DRIVE_ACCELERATION, PHYSICS_STEP, START, TABLE_HEIGHT, TABLE_WIDTH, THRONE_ROOM,
     TOWER_CENTERS, TOWER_RADIUS, TURN_SPEED, WALL_ZONES, Block, Simulation, _finite_number, _polygon_bounds as _bounds,
+    _rotated_footprint,
     construction_score, contact_axes, polygon_contact, rectangle_corners, scoring_zones,
     swept_contact, table_contact, throne_room_score, travel_time,
 )
@@ -115,11 +116,6 @@ class Plan:
 
 def _clear(start, end, footprints, obstacles):
     return _clear_bounded(start, end, tuple((shape, _bounds(shape)) for shape in footprints), obstacles)
-
-
-@lru_cache(maxsize=4096)
-def _rotated_footprint(footprint, angle):
-    return tuple(Vec2d(*corner).rotated(angle) for corner in footprint)
 
 
 def _clear_bounded(start, end, footprints, obstacles, margin=0):
@@ -318,7 +314,7 @@ def _approach(start, end, angle, footprints, obstacles) -> Approach | None:
         middle = (start + end) / 2
         along += tuple(middle + normal * shift for shift in (40, -40, 80, -80))
     pivots = (start, end, *along, OPEN_SPACE, *WAYPOINTS)
-    pivots = [(_segment_time(start, pivot), _segment_time(pivot, end), pivot)
+    pivots = [(travel_time(start.get_distance(pivot)), travel_time(pivot.get_distance(end)), pivot)
               for pivot in dict.fromkeys(pivots)]
     clear_before = _visibility(footprints, obstacles, 0)
     for first_direct, last, pivot in sorted(pivots, key=lambda p: p[0] + p[1]):
@@ -636,6 +632,17 @@ def _frame(simulation, label, *, score=None):
     }
 
 
+def _drop_pose_table(shape, drop_poses):
+    table = []
+    for site, angle in drop_poses:
+        relative = _rotated_footprint(shape, angle)
+        corners = tuple(tuple(site + corner) for corner in relative)
+        zones = _wall_drop_zones(Block(tuple(site), angle, corners))
+        if zones[1]:
+            table.append((site, angle, zones, relative))
+    return tuple(table)
+
+
 def _play_batches(simulation, record, policy, drop_poses):
     """Charge les ventouses disponibles et dépose les piles une par une."""
     def perform(action, label, **choice):
@@ -646,6 +653,7 @@ def _play_batches(simulation, record, policy, drop_poses):
         return action(simulation, **choice, advance=advance, deadline=BUILD_DEADLINE)
 
     cups = range(1, len(simulation.geometry.mounts) + 1)
+    shape_tables = {}
     while simulation.time < BUILD_DEADLINE:
         held = {}
         missed = set()
@@ -706,15 +714,15 @@ def _play_batches(simulation, record, policy, drop_poses):
             for cup, index in held.items():
                 block = blocks[index]
                 center = Vec2d(*block.position)
-                footprint = tuple(Vec2d(*corner) - center for corner in block.corners)
-                for site, angle in drop_poses:
-                    axis_turn = remainder(angle - block.angle, 2 * pi)
-                    relative = _rotated_footprint(footprint, axis_turn)
-                    corners = tuple(tuple(site + corner) for corner in relative)
-                    projected = Block(tuple(site), angle, corners)
-                    zones = _wall_drop_zones(projected)
-                    if not zones[1] or not _clear(site, site, (relative,), obstacles):
+                shape = tuple((Vec2d(*corner) - center).rotated(-block.angle) for corner in block.corners)
+                # Les piles de même dimension partagent les poses, quelle que soit leur orientation actuelle.
+                key = tuple((round(vertex.x, 6), round(vertex.y, 6)) for vertex in shape)
+                if key not in shape_tables:
+                    shape_tables[key] = _drop_pose_table(shape, drop_poses)
+                for site, angle, zones, relative in shape_tables[key]:
+                    if not _clear(site, site, (relative,), obstacles):
                         continue
+                    axis_turn = remainder(angle - block.angle, 2 * pi)
                     gain = construction_score((*sites, zones)) - score
                     # À gain égal, éviter de remplir d'abord le passage central des remparts.
                     central_penalty = max(0, 650 - abs(site.y - TABLE_HEIGHT / 2)) / 400
