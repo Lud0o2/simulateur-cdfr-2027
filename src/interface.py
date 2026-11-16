@@ -1,3 +1,4 @@
+from bisect import bisect_right
 from math import cos, degrees, hypot, sin
 from pathlib import Path
 from time import perf_counter
@@ -5,25 +6,61 @@ from time import perf_counter
 from .simulateur import TABLE_HEIGHT, TABLE_WIDTH, TURN_STEP, Simulation
 
 BORDER = 22
+BACKGROUND = "#111820"
+SURFACE = "#1b2732"
+BORDER_COLOR = "#344450"
+FOREGROUND = "#f0f4f6"
+MUTED = "#aabac5"
+ACCENT = "#84e0cb"
+YELLOW = "#f5d477"
+WARNING = "#ffbc75"
+FONT = "Segoe UI"
 
 
-def create_window(simulation: Simulation | None = None, *, replay=None, trial=None):
+class Playback:
+    def __init__(self, replay, trial, *, loop=False):
+        self.replay = replay
+        self.trial = trial
+        self.loop = loop
+        self.playing = True
+        self.speed = 1.0
+        self.pending = None
+
+    def offer(self, trial, replay):
+        self.pending = trial, replay
+        if self.trial is None:
+            self.restart()
+
+    def restart(self):
+        if self.pending is not None:
+            self.trial, self.replay = self.pending
+            self.pending = None
+        self.replay.time = self.replay.start
+
+    def advance(self, seconds):
+        if not self.playing or (self.trial is None and self.replay.start == self.replay.duration):
+            return False
+        if self.loop and self.replay.time >= self.replay.duration:
+            self.restart()
+            return True
+        self.replay.time = min(self.replay.duration, self.replay.time + seconds * self.speed)
+        if not self.loop and self.replay.time >= self.replay.duration:
+            self.playing = False
+        return True
+
+
+def create_window(simulation: Simulation | None = None, *, replay=None, trial=None, dashboard=None):
     import tkinter as tk
     from tkinter import ttk
 
     from PIL import Image, ImageTk
 
-    background = "#111820"
-    surface = "#1b2732"
-    border_color = "#344450"
-    foreground = "#f0f4f6"
-    muted = "#aabac5"
-    accent = "#84e0cb"
-    yellow = "#f5d477"
-    warning = "#ffbc75"
-    font = "Segoe UI"
+    background, surface, border_color, foreground = BACKGROUND, SURFACE, BORDER_COLOR, FOREGROUND
+    muted, accent, yellow, warning, font = MUTED, ACCENT, YELLOW, WARNING, FONT
     root = tk.Tk()
     mode = "Pilotage manuel" if replay is None else f"Replay · Essai {trial}"
+    if dashboard is not None:
+        mode = "Replay du meilleur réseau"
     root.title(f"CDFR 2027 · {mode}")
     root.configure(bg=background, padx=20, pady=16)
     width = min(1000, root.winfo_screenwidth() - 48)
@@ -32,8 +69,18 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     root.attributes("-fullscreen", True)
     root.bind("<Escape>", lambda _event: root.attributes("-fullscreen", False))
     root.bind("<F11>", lambda _event: root.attributes("-fullscreen", not root.attributes("-fullscreen")))
+    updates = {}
+
+    def schedule(delay, update):
+        updates[update] = root.after(delay, update)
+
+    def cancel_updates(event):
+        if event.widget is root:
+            for timer in updates.values():
+                root.after_cancel(timer)
+
+    root.bind("<Destroy>", cancel_updates)
     content = tk.Frame(root, bg=background)
-    content.pack(fill="both", expand=True)
     content.columnconfigure(0, weight=1)
     content.rowconfigure(1, weight=1)
 
@@ -50,6 +97,10 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         bordercolor=surface, lightcolor=accent, darkcolor=accent, focuscolor=accent,
         sliderlength=14, arrowsize=9, gripcount=0,
     )
+    if dashboard is not None:
+        dashboard.mount(root)
+    content.pack(fill="both", expand=True)
+    playback = Playback(replay, trial, loop=dashboard is not None) if replay is not None else None
 
     header = tk.Frame(content, bg=background)
     header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -59,7 +110,8 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         heading, text="CDFR 2027", font=(font, 20, "bold"),
         bg=background, fg=foreground,
     ).pack(anchor="w")
-    tk.Label(heading, text=mode, bg=background, fg=muted, font=(font, 10)).pack(anchor="w")
+    subtitle = tk.Label(heading, text=mode, bg=background, fg=muted, font=(font, 10))
+    subtitle.pack(anchor="w")
 
     scoreboard = tk.Frame(header, bg=surface, padx=12, pady=5)
     scoreboard.pack(side="right")
@@ -97,6 +149,7 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         canvas.create_polygon(0, 0, 0, 0, 0, 0, 0, 0, fill="#c99d68", outline="#553b24", width=2)
         for _ in (simulation.blocks if replay is None else replay.frames[0]["piles"])
     ]
+    trace = canvas.create_line(0, 0, 0, 0, fill="#8baea1", width=2, state="hidden") if dashboard else None
     path = canvas.create_line(0, 0, 0, 0, fill=accent, width=2, dash=(4, 5), state="hidden")
     cups_at_start = simulation.suction_cups if replay is None else replay.frame["cups"]
     # Le châssis masque les supports intérieurs, y compris dans les anciens replays.
@@ -135,11 +188,24 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
             else:
                 label = "Trajet bloqué" if blocked else "Arrivé"
         else:
-            frame = replay.frame
+            current = playback.replay
+            frame = current.frame
             points, position, angle = frame["score"], frame["position"], frame["heading"]
             footprint, piles, cups = frame["robot"], frame["piles"], frame["cups"]
             target, blocked, label = frame["target"], frame["blocked"], frame["action"]
-            readout.configure(text=f"{replay.time:.1f} s · fin à {replay.duration:.1f} s")
+            time = f"{current.time:.1f} s · fin à {current.duration:.1f} s"
+            if dashboard is not None:
+                subtitle.configure(text=f"Replay · Réseau #{playback.trial}" if playback.trial is not None else mode)
+                x, y = position
+                time += f"  ·  X {x:.0f}  Y {y:.0f} mm  ·  {degrees(angle) % 360:.0f}°"
+                start = bisect_right(current.times, current.time - 5)
+                end = bisect_right(current.times, current.time)
+                trail = [border + value * scale for previous in current.frames[start:end:2]
+                         for value in previous["position"]]
+                if len(trail) >= 4:
+                    canvas.coords(trace, *trail)
+                canvas.itemconfigure(trace, state="normal" if len(trail) >= 4 else "hidden")
+            readout.configure(text=time)
 
         score.configure(text=str(points))
         for item, corners in zip(block_items, piles):
@@ -197,29 +263,41 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     viewport.bind("<Configure>", fit_board)
 
     if replay is not None:
-        playing = True
         dragging = False
         last_frame = perf_counter()
 
         def refresh():
-            nonlocal playing
-            finished = replay.time >= replay.duration
-            if finished and not dragging:
-                playing = False
-            button.configure(text="Pause" if playing else "Relancer" if finished else "Reprendre")
+            current = playback.replay
+            finished = current.time >= current.duration
+            if finished and not playback.loop and not dragging:
+                playback.playing = False
+            button.configure(text="Pause" if playback.playing else "Relancer" if finished else "Reprendre")
             draw()
 
-        def toggle():
-            nonlocal playing, last_frame
-            playing = not playing
+        def sync_timeline():
+            current = playback.replay
+            timeline.configure(from_=current.start, to=current.duration)
+            timeline.set(current.time)
+            refresh()
+
+        def restart():
+            nonlocal last_frame
+            playback.restart()
+            playback.playing = True
             last_frame = perf_counter()
-            if playing and replay.time >= replay.duration:
-                timeline.set(replay.start)
+            sync_timeline()
+
+        def toggle():
+            nonlocal last_frame
+            playback.playing = not playback.playing
+            last_frame = perf_counter()
+            if playback.playing and playback.replay.time >= playback.replay.duration:
+                restart()
             else:
                 refresh()
 
         def seek(value):
-            replay.time = float(value)
+            playback.replay.time = float(value)
             refresh()
 
         def drag(event):
@@ -238,15 +316,29 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         def tick_replay():
             nonlocal last_frame
             now = perf_counter()
-            if playing and not dragging:
-                timeline.set(min(replay.duration, replay.time + now - last_frame))
+            if not dragging and playback.advance(now - last_frame):
+                if playback.replay.duration != float(timeline.cget("to")):
+                    sync_timeline()
+                else:
+                    timeline.set(playback.replay.time)
             last_frame = now
-            root.after(16, tick_replay)
+            schedule(16, tick_replay)
+
+        def poll_training():
+            incoming = dashboard.poll()
+            if incoming is not None:
+                playback.offer(*incoming)
+                sync_timeline()
+            schedule(150, poll_training)
 
         controls = tk.Frame(footer, bg=surface)
         controls.pack(fill="x")
         button = ttk.Button(controls, command=toggle, width=10, style="Panel.TButton")
         button.pack(side="left", padx=(0, 10))
+        if dashboard is not None:
+            ttk.Button(controls, text="Recommencer", command=restart, style="Panel.TButton").pack(
+                side="left", padx=(0, 10),
+            )
         timeline = ttk.Scale(
             controls, from_=replay.start, to=replay.duration, value=replay.time, command=seek,
             style="Replay.Horizontal.TScale", cursor="hand2",
@@ -255,6 +347,18 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         timeline.bind("<Button-1>", drag)
         timeline.bind("<B1-Motion>", drag)
         timeline.bind("<ButtonRelease-1>", release_drag)
+        if dashboard is not None:
+            loop = tk.BooleanVar(master=root, value=True)
+            speed = tk.StringVar(master=root, value="1")
+            style.configure("Replay.TCheckbutton", background=surface, foreground=foreground, font=(font, 9))
+            ttk.Checkbutton(controls, text="Boucle", variable=loop, style="Replay.TCheckbutton",
+                            command=lambda: setattr(playback, "loop", loop.get())).pack(side="left", padx=8)
+            tk.Label(controls, text="×", bg=surface, fg=foreground, font=(font, 10)).pack(side="left")
+            speeds = ttk.Combobox(controls, textvariable=speed, state="readonly", width=4,
+                                  values=("0,5", "1", "2", "5", "10"))
+            speeds.pack(side="left", padx=(2, 0))
+            speeds.bind("<<ComboboxSelected>>", lambda _event: setattr(playback, "speed", float(speed.get().replace(",", "."))))
+            poll_training()
         refresh()
         tick_replay()
         return root
@@ -376,7 +480,7 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         simulation.advance(now - last_frame)
         last_frame = now
         draw()
-        root.after(16, tick)
+        schedule(16, tick)
 
     tick()
     return root

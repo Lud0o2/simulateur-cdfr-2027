@@ -408,7 +408,7 @@ class Simulation:
     @property
     def score(self) -> int:
         """Points de construction jaunes d'après la pose actuelle des piles libres."""
-        return self.score_for_blocks(self.blocks)
+        return construction_score(scoring_zones(pile.free_block()) for pile in self._piles if pile.grip is None)
 
     def score_for_blocks(self, blocks: tuple[Block, ...]) -> int:
         """Calcule le score à partir des poses de toutes les piles au pas courant."""
@@ -747,6 +747,11 @@ class Simulation:
         # Dans le repère du robot, la pile tourne dans l'autre sens.
         return any(arc_hits_edge(vertex, -angle, a, b) for vertex in corners for a, b in edges(footprint))
 
+    @property
+    def settled(self) -> bool:
+        return (not self.moving and not self._armed_cups
+                and all(pile.grip or pile.body.is_sleeping for pile in self._piles))
+
     def advance(self, seconds: float):
         if not isfinite(seconds) or seconds < 0:
             raise ValueError("La durée doit être finie et positive ou nulle.")
@@ -755,7 +760,7 @@ class Simulation:
         steps = int((self._remainder + 1e-12) / PHYSICS_STEP)
         self._remainder = max(0.0, self._remainder - steps * PHYSICS_STEP)
         for _ in range(steps):
-            if not self.moving and not self._armed_cups and all(pile.grip or pile.body.is_sleeping for pile in self._piles):
+            if self.settled:
                 break
             self._step()
             if self._armed_cups:
