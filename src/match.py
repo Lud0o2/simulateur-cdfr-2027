@@ -639,7 +639,9 @@ def _drop_pose_table(shape, drop_poses):
         corners = tuple(tuple(site + corner) for corner in relative)
         zones = _wall_drop_zones(Block(tuple(site), angle, corners))
         if zones[1]:
-            table.append((site, angle, zones, relative))
+            # À gain égal, éviter de remplir d'abord le passage central des remparts.
+            penalty = max(0, 650 - abs(site.y - TABLE_HEIGHT / 2)) / 400
+            table.append((site, angle, zones, relative, penalty))
     return tuple(table)
 
 
@@ -711,26 +713,28 @@ def _play_batches(simulation, record, policy, drop_poses):
             score = construction_score(sites)
             start, _, obstacles = _action_state(simulation)
             placements = []
+            available_drops = {}
             for cup, index in held.items():
                 block = blocks[index]
                 center = Vec2d(*block.position)
                 shape = tuple((Vec2d(*corner) - center).rotated(-block.angle) for corner in block.corners)
                 # Les piles de même dimension partagent les poses, quelle que soit leur orientation actuelle.
                 key = tuple((round(vertex.x, 6), round(vertex.y, 6)) for vertex in shape)
-                if key not in shape_tables:
-                    shape_tables[key] = _drop_pose_table(shape, drop_poses)
-                for site, angle, zones, relative in shape_tables[key]:
-                    if not _clear(site, site, (relative,), obstacles):
-                        continue
+                if key not in available_drops:
+                    if key not in shape_tables:
+                        shape_tables[key] = _drop_pose_table(shape, drop_poses)
+                    available_drops[key] = [
+                        (site, angle, construction_score((*sites, zones)) - score, penalty)
+                        for site, angle, zones, relative, penalty in shape_tables[key]
+                        if _clear(site, site, (relative,), obstacles)
+                    ]
+                for site, angle, gain, penalty in available_drops[key]:
                     axis_turn = remainder(angle - block.angle, 2 * pi)
-                    gain = construction_score((*sites, zones)) - score
-                    # À gain égal, éviter de remplir d'abord le passage central des remparts.
-                    central_penalty = max(0, 650 - abs(site.y - TABLE_HEIGHT / 2)) / 400
                     # Le rectangle garde la même pose lorsque le châssis l'aborde dans l'autre sens.
                     for offset in ((0,) if policy is None else (0, pi)):
                         turn = axis_turn if not offset else remainder(angle + offset - block.angle, 2 * pi)
                         distance = start.get_distance(site - (center - start).rotated(turn))
-                        duration = travel_time(distance) + abs(turn) / TURN_SPEED + central_penalty
+                        duration = travel_time(distance) + abs(turn) / TURN_SPEED + penalty
                         placements.append((gain, duration, cup, site, angle + offset))
             placements.sort(key=lambda item: (-item[0], item[1]))
             if policy is not None and placements:

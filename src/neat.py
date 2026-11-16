@@ -54,7 +54,7 @@ DROP_POSES = tuple(dict.fromkeys(DROP_POSES))
 
 @dataclass(frozen=True)
 class Settings:
-    population: int = 100
+    population: int = 200
     generations: int = 0
     seed: int = 0
     sigma: float = 0.28
@@ -303,6 +303,7 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
     workers = min(workers, max(1, (os.cpu_count() or 1) - 1))
     started = perf_counter()
     champion = saved = None
+    recording = None
     simulations = completed = 0
     spread = settings.sigma
     generation = 1
@@ -315,6 +316,12 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
                      evaluated=len(results), simulations=simulations, elapsed=elapsed,
                      rate=simulations / max(elapsed, 0.001), **event))
 
+    def save_recording(recording):
+        future, individual = recording
+        data = write_champion(directory, individual, future.result(), settings, initial)
+        report(champion=data, log=f"Champion #{individual.id} sauvegardé")
+        return individual
+
     report(log=f"Graine {settings.seed} · {workers} processus · amplitude {spread:.3f}")
     if initial is not None:
         report(log="Population initialisée autour du génome importé")
@@ -325,9 +332,8 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
             results = [item for item in population if item.rank is not None]
             waiting = deque(item for item in population if item.rank is None)
             tasks = {}
-            recording = None
             report(log=f"Génération {generation}")
-            while True:
+            while tasks or (waiting and not stop.is_set()):
                 if recording is None and champion != saved:
                     recording = (pool.submit(evaluate, champion.genome, True), champion)
                 if not (pause.is_set() or stop.is_set()):
@@ -337,8 +343,6 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
 
                 futures = tuple(tasks) + ((recording[0],) if recording else ())
                 if not futures:
-                    if not waiting or stop.is_set():
-                        break
                     report("Pause")
                     stop.wait(0.25)
                     continue
@@ -360,9 +364,7 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
                         champion = individual
                     report("Pause demandée" if pause.is_set() else "Entraînement", **message)
                 if recording and recording[0] in ready:
-                    future, saved = recording
-                    data = write_champion(directory, saved, future.result(), settings, initial)
-                    report(champion=data, log=f"Champion #{saved.id} sauvegardé")
+                    saved = save_recording(recording)
                     recording = None
 
             if len(results) != settings.population:
@@ -387,7 +389,15 @@ def train(settings, directory, publish, *, initial=None, pause=None, stop=None):
                 report(log=f"Amplitude des mutations · {spread:.3f}")
             population = offspring(ranked, rng, settings, spread, generation,
                                    (generation - 1) * settings.population + 1)
-    report("Terminé", log="Entraînement arrêté" if stop.is_set() else "Entraînement terminé")
+        if recording is not None:
+            saved = save_recording(recording)
+        if champion != saved:
+            save_recording((pool.submit(evaluate, champion.genome, True), champion))
+    if stop.is_set():
+        detail = f"champion #{champion.id} sauvegardé" if champion is not None else "aucun match évalué"
+        report("Terminé", log=f"Entraînement arrêté · {detail}")
+    else:
+        report("Terminé", log="Entraînement terminé")
     return champion
 
 
@@ -409,7 +419,7 @@ def main():
     parser = argparse.ArgumentParser(description="Neuroévolution du robot CDFR")
     parser.add_argument("mode", nargs="?", choices=("live", "train", "replay", "verify"), default="live")
     parser.add_argument("--directory", type=Path, help="dossier d'une session NEAT")
-    parser.add_argument("--population", type=int, default=100)
+    parser.add_argument("--population", type=int, default=Settings.population)
     parser.add_argument("--generations", type=int, help="0 pour continuer jusqu'à l'arrêt")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--sigma", type=float, default=0.28)

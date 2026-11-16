@@ -8,6 +8,7 @@ from queue import Empty, SimpleQueue
 from time import perf_counter
 import tkinter as tk
 from tkinter import ttk
+from tkinter.font import Font
 
 from .interface import ACCENT, BACKGROUND, BORDER_COLOR, FONT, FOREGROUND, MUTED, SURFACE, WARNING, YELLOW, create_window
 from .match import Replay, _frame
@@ -35,6 +36,11 @@ def _draw_network(canvas, genome):
         columns[depth].append(node)
     compact = width < 460
     left, right = (94, width - 44) if compact else (142, width - 100)
+    input_font = (FONT, 7 if compact else 10)
+    row_height = Font(root=canvas, font=input_font).metrics("linespace")
+    show_input_labels = height - 37 >= row_height * (len(columns[0]) + 1)
+    if not show_input_labels:
+        left = 12
     spacing = (right - left) / layers[-1]
     coordinates = {}
     for depth, nodes in enumerate(columns):
@@ -51,7 +57,8 @@ def _draw_network(canvas, genome):
     for node, (x, y) in coordinates.items():
         if node < N_INPUTS:
             radius, color = 3, MUTED
-            canvas.create_text(x - 8, y, anchor="e", text=INPUTS[node], font=(FONT, 7 if compact else 10), fill=FOREGROUND)
+            if show_input_labels:
+                canvas.create_text(x - 8, y, anchor="e", text=INPUTS[node], font=input_font, fill=FOREGROUND)
         elif node == genome.output:
             radius, color = 5, YELLOW
             canvas.create_text(x + 9, y, anchor="w", text="Choix", font=(FONT, 8 if compact else 11), fill=YELLOW)
@@ -75,7 +82,7 @@ class Dashboard:
         self.stop, self.pause = (self.context.Event(), self.context.Event()) if settings is not None else (None, None)
         self.worker = None
         self.progress = {}
-        self.stats = []
+        self.stats = deque(maxlen=30)
         self.genome = None
         self.zoom = None
         self.started = perf_counter()
@@ -94,63 +101,51 @@ class Dashboard:
 
     def mount(self, root):
         self.root = root
-        outer = tk.Frame(root, bg=SURFACE, width=326)
-        outer.pack(side="left", fill="y", padx=(0, 14))
-        outer.pack_propagate(False)
-        scroll = tk.Canvas(outer, bg=SURFACE, highlightthickness=0, borderwidth=0)
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=scroll.yview)
-        scrollbar.pack(side="right", fill="y")
-        scroll.pack(side="left", fill="both", expand=True)
-        scroll.configure(yscrollcommand=scrollbar.set)
-        inner = tk.Frame(scroll, bg=SURFACE, padx=12, pady=8)
-        window = scroll.create_window(0, 0, window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda _event: scroll.configure(scrollregion=scroll.bbox("all")))
-        scroll.bind("<Configure>", lambda event: scroll.itemconfigure(window, width=event.width))
-        def scroll_sidebar(event):
-            left = outer.winfo_rootx()
-            if event.widget is not self.log and left <= event.x_root < left + outer.winfo_width():
-                scroll.yview_scroll(int(-event.delta / 120), "units")
-
-        root.bind("<MouseWheel>", scroll_sidebar)
-
-        header = tk.Frame(inner, bg=SURFACE)
+        sidebar = tk.Frame(root, bg=SURFACE, width=258, padx=10, pady=10)
+        sidebar.pack(side="left", fill="y", padx=(0, 12))
+        sidebar.pack_propagate(False)
+        header = tk.Frame(sidebar, bg=SURFACE)
         header.pack(fill="x", pady=(0, 4))
-        self._label(header, "Neuroévolution", size=17, bold=True).pack(side="left")
+        self.status = self._label(header, "Démarrage", color=ACCENT, size=10, bold=True)
+        self.status.pack(side="left")
         if self.settings is not None:
             self.pause_button = ttk.Button(header, text="Pause", command=self._toggle_pause, style="Panel.TButton")
             self.pause_button.pack(side="right")
-        self.status = self._label(inner, "Démarrage", color=ACCENT, size=10, bold=True)
-        self.status.pack(anchor="w", pady=(0, 6))
-        self.training_text = self._label(inner, color=MUTED)
+        self.generation = self._label(sidebar, size=15, bold=True)
+        self.generation.pack(anchor="w")
+        self.training_text = self._label(sidebar, color=MUTED)
         self.training_text.pack(anchor="w")
+        if self.settings is not None:
+            self.stop_button = ttk.Button(sidebar, text="Arrêter et sauvegarder", command=self._request_stop,
+                                          style="Panel.TButton")
+            self.stop_button.pack(fill="x", pady=(6, 0))
 
-        champion = self._section(inner, "Meilleur historique")
-        self.record_score = self._label(champion, "En attente", color=YELLOW, size=17, bold=True)
+        champion = self._section(sidebar, "Meilleur historique")
+        self.record_score = self._label(champion, "En attente", color=YELLOW, size=15, bold=True)
         self.record_score.pack(anchor="w")
-        self.record_text = self._label(champion, color=MUTED)
-        self.record_text.pack(anchor="w")
 
-        statistics = self._section(inner, "Dernière génération complète")
-        self.stats_text = self._label(statistics, "En attente", color=MUTED)
-        self.stats_text.pack(anchor="w")
-        self.chart = tk.Canvas(statistics, bg=SURFACE, height=52, highlightthickness=0, borderwidth=0)
-        self.chart.pack(fill="x", pady=(3, 0))
+        statistics = self._section(sidebar, "Évolution par génération")
+        self.chart = tk.Canvas(statistics, bg=BACKGROUND, height=120, highlightthickness=0)
+        self.chart.pack(fill="x")
         self.chart.bind("<Configure>", lambda _event: self._draw_chart())
 
-        network = self._section(inner, "Réseau", command=self._enlarge)
-        self.graph = tk.Canvas(network, bg=BACKGROUND, height=244, highlightthickness=0, borderwidth=0)
-        self.graph.pack(fill="x")
-        self.graph.bind("<Configure>", lambda _event: _draw_network(self.graph, self.genome))
+        network = self._section(sidebar, "Réseau", command=self._enlarge, expand=True)
         legend = tk.Frame(network, bg=SURFACE)
-        legend.pack(fill="x")
+        legend.pack(side="bottom", fill="x")
         self._label(legend, "Poids +", color=ACCENT, size=8).pack(side="left", padx=(0, 8))
         self._label(legend, "Poids −", color=NEGATIVE, size=8).pack(side="left")
+        self.graph = tk.Canvas(network, bg=BACKGROUND, height=1, highlightthickness=0)
+        self.graph.pack(fill="both", expand=True)
+        self.graph.bind("<Configure>", lambda _event: _draw_network(self.graph, self.genome))
 
-        events = self._section(inner, "Événements")
+        events = tk.Frame(root, bg=SURFACE, width=194, padx=8, pady=10)
+        events.pack(side="right", fill="y", padx=(12, 0))
+        events.pack_propagate(False)
+        self._label(events, "Logs", bold=True, size=10).pack(anchor="w", pady=(0, 6))
         log_scroll = ttk.Scrollbar(events, orient="vertical")
         log_scroll.pack(side="right", fill="y")
         self.log = tk.Text(events, bg=BACKGROUND, fg=FOREGROUND, font=(FONT, 9), wrap="word",
-                           height=6, highlightthickness=0, borderwidth=0, padx=6, pady=3,
+                           highlightthickness=0, borderwidth=0, padx=6, pady=3,
                            state="disabled", yscrollcommand=log_scroll.set)
         self.log.pack(fill="both", expand=True)
         log_scroll.configure(command=self.log.yview)
@@ -158,12 +153,12 @@ class Dashboard:
             root.protocol("WM_DELETE_WINDOW", self._close)
 
     def _label(self, parent, text="", *, size=9, color=FOREGROUND, bold=False):
-        return tk.Label(parent, text=text, bg=SURFACE, fg=color, justify="left", anchor="w", wraplength=276,
+        return tk.Label(parent, text=text, bg=SURFACE, fg=color, anchor="w",
                         font=(FONT, size, "bold" if bold else "normal"))
 
-    def _section(self, parent, title, command=None):
+    def _section(self, parent, title, *, command=None, expand=False):
         section = tk.Frame(parent, bg=SURFACE)
-        section.pack(fill="x", pady=(10, 0))
+        section.pack(fill="both" if expand else "x", expand=expand, pady=(10, 0))
         tk.Frame(section, height=1, bg=BORDER_COLOR).pack(fill="x", pady=(0, 5))
         header = tk.Frame(section, bg=SURFACE)
         header.pack(fill="x", pady=(0, 3))
@@ -187,50 +182,75 @@ class Dashboard:
     def _draw_chart(self):
         canvas = self.chart
         canvas.delete("all")
-        stats = self.stats[-30:]
-        if len(stats) < 2:
-            return
         width, height = canvas.winfo_width(), canvas.winfo_height()
-        low = min(stat["mean"] for stat in stats)
-        span = max(1, max(stat["best"] for stat in stats) - low)
-        for field, color in (("mean", ACCENT), ("best", YELLOW)):
-            coords = [coord for i, stat in enumerate(stats)
-                      for coord in (5 + (width - 10) * i / (len(stats) - 1),
-                                    height - 7 - (height - 14) * (stat[field] - low) / span)]
-            canvas.create_line(*coords, fill=color, width=2)
-        canvas.create_text(6, 2, anchor="nw", text=f"Générations {stats[0]['generation']}–{stats[-1]['generation']}",
+        if width <= 1 or height <= 1:
+            return
+        if not self.stats:
+            canvas.create_text(width / 2, height / 2, text="En attente de résultats", font=(FONT, 9), fill=MUTED)
+            return
+        left, right = 7, width - 7
+        row_height = (height - 17) / 2
+        for row, (field, title, color) in enumerate((("best", "Score", YELLOW), ("time", "Temps du score", ACCENT))):
+            values = [stat[field] for stat in self.stats]
+            label = f"{values[-1]} pts" if field == "best" else f"{values[-1]:.2f} s"
+            top = row * row_height
+            canvas.create_text(left, top + 3, anchor="nw", text=title, font=(FONT, 8), fill=MUTED)
+            canvas.create_text(right, top + 3, anchor="ne", text=label, font=(FONT, 8, "bold"), fill=color)
+            low, high = min(values), max(values)
+            if low == high:
+                low, high = low - 0.5, high + 0.5
+            bottom = top + row_height - 6
+            step = (right - left) / max(1, len(values) - 1)
+            scale = (row_height - 28) / (high - low)
+            points = [(left + i * step, bottom - (value - low) * scale) for i, value in enumerate(values)]
+            canvas.create_line(left, bottom + 3, right, bottom + 3, fill=BORDER_COLOR)
+            if len(points) > 1:
+                canvas.create_line(*(value for point in points for value in point), fill=color, width=2)
+            x, y = points[-1]
+            canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill=color, outline="")
+        canvas.create_text(left, height - 3, anchor="sw", text=f"Gén. {self.stats[0]['generation']}",
                            font=(FONT, 7), fill=MUTED)
+        if len(self.stats) > 1:
+            canvas.create_text(right, height - 3, anchor="se", text=f"Gén. {self.stats[-1]['generation']}",
+                               font=(FONT, 7), fill=MUTED)
 
     def _display_progress(self):
         progress = self.progress
         status = progress.get("status", "Démarrage")
-        self.status.configure(text=status, fg=WARNING if status in {"Erreur", "Pause", "Pause demandée"} else ACCENT)
+        finished = status in {"Terminé", "Erreur"}
+        stopping = self.stop is not None and self.stop.is_set()
+        if stopping and not finished:
+            status = "Arrêt en cours"
+        self.status.configure(text=status, fg=WARNING if status in {"Erreur", "Pause", "Pause demandée", "Arrêt en cours"} else ACCENT)
         if self.settings is None:
-            self.training_text.configure(text="Table officielle · match de 100 s")
+            progress = self.stats[-1] if self.stats else progress.get("champion", {})
+            generation = progress.get("generation")
+            elapsed = progress.get("elapsed")
         else:
-            elapsed = progress.get("elapsed", 0) if status in {"Terminé", "Erreur"} else perf_counter() - self.started
-            count = progress.get("simulations", 0)
-            limit = self.settings.generations
-            budget = f" / {limit}" if limit else ""
-            self.training_text.configure(text=(
-                f"Génération {progress.get('generation', 1)} · {progress.get('completed', 0)} terminées{budget}\n"
-                f"{progress.get('evaluated', 0)} / {self.settings.population} individus évalués\n"
-                f"{int(elapsed) // 60:02d}:{int(elapsed) % 60:02d} · "
-                f"{count} simulations · {count / max(elapsed, 0.001):.2f}/s"
-            ))
-            if status in {"Terminé", "Erreur"}:
+            generation = progress.get("generation", 1)
+            elapsed = progress.get("elapsed", 0) if finished else perf_counter() - self.started
+            if finished or stopping:
                 self.pause_button.state(["disabled"])
+                self.stop_button.state(["disabled"])
+        self.generation.configure(text=f"Génération {generation}" if generation is not None else "")
+        if elapsed is not None:
+            minutes, seconds = divmod(int(elapsed), 60)
+            count = progress.get("simulations", 0)
+            self.training_text.configure(text=f"{minutes:02d}:{seconds:02d} · {count} sim. · {count / max(elapsed, 0.001):.2f}/s")
 
     def _append_log(self, message):
+        at_end = self.log.yview()[1] >= 1
         self.log.configure(state="normal")
         self.log.insert("end", message + "\n")
         if int(self.log.index("end-1c").split(".")[0]) > 100:
             self.log.delete("1.0", "2.0")
-        self.log.see("end")
+        if at_end:
+            self.log.see("end")
         self.log.configure(state="disabled")
 
     def poll(self):
         incoming = None
+        chart_changed = False
         while True:
             try:
                 event = self.events.get_nowait()
@@ -240,27 +260,18 @@ class Dashboard:
             if "log" in event:
                 self._append_log(event["log"])
             if "stats" in event:
-                stats = event["stats"]
-                self.stats.append(stats)
-                self.stats = self.stats[-30:]
-                distribution = "  ".join(f"{score}×{count}" for score, count in stats["distribution"])
-                self.stats_text.configure(text=(f"{stats['best']} pts en {stats['time']:.2f} s · génération {stats['generation']}\n"
-                                                f"Moyenne {stats['mean']:.1f} · médiane {stats['median']:g}\n"
-                                                f"Points × effectif  {distribution}"))
-                self._draw_chart()
+                self.stats.append(event["stats"])
+                chart_changed = True
             if "champion" in event:
                 data, replay = event["champion"], event["replay"]
                 self.genome = Genome.read(data["genome"])
                 self.record_score.configure(text=f"{data['score']} pts en {data['time']:.2f} s")
-                self.record_text.configure(text=(
-                    f"Réseau #{data['id']} · génération {data['generation']}\n"
-                    f"{self.genome.output + 1} neurones · {len(self.genome.links)} connexions\n"
-                    f"Fitness ({data['score']}, {-data['time']:.2f})"
-                ))
                 _draw_network(self.graph, self.genome)
                 if self.zoom is not None and self.zoom.winfo_exists():
                     _draw_network(self.zoom, self.genome)
                 incoming = data["id"], replay
+        if chart_changed:
+            self._draw_chart()
         if (self.worker is not None and self.worker.exitcode not in (None, 0)
                 and self.progress.get("status") != "Erreur"):
             self.progress.update(status="Erreur", elapsed=perf_counter() - self.started)
@@ -275,6 +286,10 @@ class Dashboard:
         else:
             self.pause.set()
             self.pause_button.configure(text="Reprendre")
+
+    def _request_stop(self):
+        self.stop.set()
+        self._display_progress()
 
     def _close(self):
         self.stop.set()

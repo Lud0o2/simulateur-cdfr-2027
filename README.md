@@ -9,13 +9,15 @@ Depuis la racine, avec [les dépendances](#commandes-principales) et [le tapis](
 | Action | Commande |
 | --- | --- |
 | Entraîner et regarder le meilleur réseau en boucle | `python -B -m src.neat` |
-| Entraîner 10 générations en arrière-plan, sans fenêtre | `python -B -m src.neat train --population 100 --generations 10` |
+| Entraîner 10 générations en arrière-plan, sans fenêtre | `python -B -m src.neat train --generations 10` |
 | Rejouer le dernier champion sauvegardé | `python -B -m src.neat replay` |
 | Resimuler le génome sauvegardé et vérifier toutes les images du match | `python -B -m src.neat verify` |
 
-La fenêtre ouvre le terrain en plein écran. Le panneau de gauche permet de mettre l’entraînement en pause et affiche le débit, les statistiques des générations et le schéma du champion. Le replay a ses propres commandes. Il tourne en boucle à ×1 par défaut et charge le nouveau record au prochain départ. Le tracé sur le tapis montre les dernières positions réellement parcourues et la cible du segment en cours. Le mode **Agrandir** affiche toutes les connexions du réseau.
+La fenêtre s’ouvre en plein écran avec le terrain au centre. À gauche, le panneau affiche la génération, le temps écoulé, le nombre de simulations et leur débit, le record, les courbes de score et de temps des 30 dernières générations et le schéma du champion. À droite, seuls les logs défilent. **Arrêter et sauvegarder** termine les évaluations lancées et enregistre les poids et le replay du meilleur réseau dans `champion.json`.
 
-Par défaut, l’entraînement en direct se poursuit jusqu’à la fermeture. `--generations 5` fixe un budget et `--generations 0` lance un entraînement continu. `--seed 2027` fixe la graine, tirée au hasard sinon. `--sigma` règle l’amplitude des mutations de poids et de biais, `--add-node` et `--add-link` les probabilités de mutation de structure. Après trois générations sans record, l’amplitude augmente, jusqu’à trois fois sa valeur initiale. Elle revient à sa valeur initiale quand un record est amélioré.
+Le replay a ses propres commandes. Il tourne en boucle à ×1 par défaut et charge le nouveau record au prochain départ. L’affichage saute l’attente finale si le terrain et le score sont identiques au buzzer. Le fichier représente le match complet de 100 secondes. Le tracé sur le tapis montre les dernières positions réellement parcourues et la cible du segment en cours. Le mode **Agrandir** affiche toutes les connexions du réseau.
+
+La population par défaut est de 200 individus. L’option `--population` permet de la régler. L’entraînement en direct se poursuit jusqu’à la fermeture par défaut. `--generations 5` fixe un budget et `--generations 0` lance un entraînement continu. `--seed 2027` fixe la graine, tirée au hasard sinon. `--sigma` règle l’amplitude des mutations de poids et de biais, `--add-node` et `--add-link` les probabilités de mutation de structure. Après trois générations sans record, l’amplitude augmente, jusqu’à trois fois sa valeur initiale. Elle revient à sa valeur initiale quand un record est amélioré.
 
 Chaque session conserve son champion et son replay dans `neat/<session>/champion.json`, et les résultats de chaque génération dans `generations.jsonl`. Les fichiers contiennent la graine, les paramètres du champion et son résultat sur la table officielle fixe. Indique `--directory "neat/<session>"` pour relire ou vérifier une session précise. `--from-genome "neat/<session>/champion.json"` initialise une nouvelle population autour d’un champion déjà entraîné.
 
@@ -34,6 +36,8 @@ Comme [Pendulum-NEAT](https://github.com/johnBuffer/Pendulum-NEAT), l’entraîn
 | NEAT amorcé sur les décisions de la référence, 40 individus, graine 411 | 8 / 299 | 65 points en 67,14 s |
 
 La population sans amorce est passée de 50 à 55 points. Son champion dépose les dix piles, puis reste bloqué à l’extérieur de la salle du trône. Le réseau d’amorce a été ajusté aux 22 décisions du match de référence. La série amorcée a égalé le record dès la première génération, avec un débit de 1,65 simulation/s sur sept processus sans fenêtre. Les deux replays ont été reproduits image par image avec `verify`.
+
+Avec `python -B -m src.neat train --population 200 --generations 2 --seed 2027` sur sept processus, le débit est passé de 0,959 simulation/s sur `0d220d6` à 1,064 après mutualisation des calculs de dépôt, mise en cache du score et production du replay en parallèle de la génération suivante. Le lot de 384 évaluations a pris 400,28 s puis 360,85 s, sauvegardes comprises. Les 384 scores et temps sont identiques, ainsi que les 2 327 images des deux replays gagnants.
 
 ## Point de reprise depuis `main`
 

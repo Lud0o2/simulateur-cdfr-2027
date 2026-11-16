@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 from pathlib import Path
 from random import Random
@@ -131,6 +131,49 @@ class TrainingTest(unittest.TestCase):
         self.assertEqual(events[-1]["status"], "Terminé")
         self.assertIn("Pause", [event["status"] for event in events])
 
+    def test_next_generation_starts_during_replay_and_stop_saves_latest_champion(self):
+        match = empty_match()
+        stop = Event()
+        scores = {}
+        first_recording = None
+
+        def submit(_evaluate, genome, record_frames=False):
+            nonlocal first_recording
+            future = Future()
+            if record_frames:
+                score = scores[genome]
+                replay = dict(match, score=score, score_max=score, frames=[dict(frame, score=score) for frame in match["frames"]])
+                if first_recording is None:
+                    first_recording = future, replay
+                else:
+                    future.set_result(replay)
+            else:
+                score = scores[genome] = 11 + len(scores)
+                if len(scores) == 4:
+                    pending, replay = first_recording
+                    self.assertFalse(pending.done())
+                    pending.set_result(replay)
+                future.set_result((score, 0))
+            return future
+
+        def wait(futures, **_options):
+            ready = {future for future in futures if future.done()}
+            self.assertTrue(ready, "La génération suivante attend le replay")
+            return ready, set(futures) - ready
+
+        def publish(event):
+            if event["simulations"] == 4:
+                stop.set()
+
+        with (TemporaryDirectory() as folder, patch("src.neat.ProcessPoolExecutor") as pool,
+              patch("src.neat._training_workers", return_value=2), patch("src.neat.os.cpu_count", return_value=3),
+              patch("src.neat.wait", side_effect=wait)):
+            pool.return_value.__enter__.return_value.submit.side_effect = submit
+            directory = Path(folder)
+            champion = train(Settings(population=3, seed=13), directory, publish, stop=stop)
+            data, genome, _ = read_champion(directory)
+        self.assertEqual((data["id"], data["generation"], data["score"], genome), (4, 2, 14, champion.genome))
+
     def test_replay_swaps_pending_champion_at_loop_boundary(self):
         first, second = Replay(empty_match()), Replay(empty_match())
         clock = Playback(first, 1, loop=True)
@@ -151,6 +194,20 @@ class TrainingTest(unittest.TestCase):
         self.assertFalse(clock.playing)
         clock.restart()
         self.assertEqual(clock.replay.time, 0)
+
+    def test_visual_replay_skips_only_a_stationary_tail_with_the_same_score(self):
+        match = empty_match()
+        match["frames"].insert(1, dict(match["frames"][0], t=67))
+        replay = Replay(match)
+        clock = Playback(replay, 1, skip_idle=True)
+        clock.advance(100)
+        self.assertEqual((replay.time, replay.duration, clock.playing), (67, 100, False))
+
+        final = dict(match["frames"][-1], score=11)
+        replay = Replay(dict(match, frames=[*match["frames"][:-1], final]))
+        clock = Playback(replay, 2, skip_idle=True)
+        clock.advance(100)
+        self.assertEqual((replay.time, replay.frame["score"]), (100, 11))
 
 
 if __name__ == "__main__":

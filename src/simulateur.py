@@ -341,6 +341,8 @@ class Simulation:
 
     def reset(self):
         self.time = 0.0
+        self._scored_blocks: tuple[Block, ...] = ()
+        self._construction_score = 0
         self.movement: Movement | None = None
         self._pivot: pymunk.PivotJoint | None = None
         self._rolling_target: float | None = None
@@ -408,12 +410,18 @@ class Simulation:
     @property
     def score(self) -> int:
         """Points de construction jaunes d'après la pose actuelle des piles libres."""
-        return construction_score(scoring_zones(pile.free_block()) for pile in self._piles if pile.grip is None)
+        return self.score_for_blocks()
 
-    def score_for_blocks(self, blocks: tuple[Block, ...]) -> int:
-        """Calcule le score à partir des poses de toutes les piles au pas courant."""
-        return construction_score(scoring_zones(block) for pile, block in zip(self._piles, blocks)
-                                  if pile.grip is None)
+    def score_for_blocks(self, blocks: tuple[Block, ...] | None = None) -> int:
+        """Réutilise le score tant que les poses des piles libres sont identiques."""
+        if blocks is None:
+            free_blocks = tuple(pile.free_block() for pile in self._piles if pile.grip is None)
+        else:
+            free_blocks = tuple(block for pile, block in zip(self._piles, blocks) if pile.grip is None)
+        if free_blocks != self._scored_blocks:
+            self._construction_score = construction_score(map(scoring_zones, free_blocks))
+            self._scored_blocks = free_blocks
+        return self._construction_score
 
     @property
     def return_score(self) -> int:
