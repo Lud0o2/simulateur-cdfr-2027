@@ -51,6 +51,13 @@ def _delegate_train(rest):
     reseau.main()
 
 
+def _delegate_neat(rest):
+    from . import neat
+
+    sys.argv = ["neat", *rest]
+    neat.main()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -67,6 +74,9 @@ def main(argv=None):
     train.set_defaults(run=lambda args: _delegate_train(["train", *args.rest]))
     compare = commands.add_parser("compare", help="Délègue à src.reseau compare.")
     compare.set_defaults(run=lambda args: _delegate_train(["compare"]))
+    neat = commands.add_parser("neat", help="Délègue à src.neat.")
+    neat.add_argument("rest", nargs=argparse.REMAINDER)
+    neat.set_defaults(run=lambda args: _delegate_neat(args.rest))
     args = parser.parse_args(argv)
     args.run(args)
 

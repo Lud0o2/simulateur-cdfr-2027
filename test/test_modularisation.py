@@ -121,6 +121,19 @@ class ReplayPlayerTest(TestCase):
         player.chercher(2.0)
         self.assertTrue(player.fin())
 
+    def test_collection_replay_accepts_unloaded_piles(self):
+        def frame(t, piles, score):
+            return {"t": t, "position": [0, 0], "heading": 0.0,
+                    "robot": [[0, 0], [1, 0], [0, 1]],
+                    "piles": [[[0, 0], [1, 0], [1, 1], [0, 1]]] * piles,
+                    "cups": [], "target": None, "blocked": False, "score": score, "action": "test"}
+
+        frames = [frame(0.0, 2, 0), frame(1.0, 1, 1)]
+        replay = Replay({"obstacles": [], "strategie": "opti_take", "frames": frames})
+        self.assertTrue(replay.collection)
+        with self.assertRaisesRegex(ValueError, "nombre de piles"):
+            Replay({"obstacles": [], "frames": frames})
+
 
 class CompositionTest(TestCase):
     def test_all_rewards_and_selectors_are_usable(self):

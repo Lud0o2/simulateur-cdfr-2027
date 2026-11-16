@@ -36,13 +36,16 @@ simulateur-cdfr-2027/
 │   ├── evaluation/             # scénarios, métriques, benchmark
 │   ├── cli/                    # points d'entrée CLI
 │   ├── ui/                     # thème, assets, rendu, clavier, fenêtre
+│   ├── neat.py                 # neuroévolution NEAT, génomes et champions
+│   ├── interface_neat.py       # tableau de bord NEAT et replay du champion
 │   ├── simulateur.py           # façade de compatibilité
 │   ├── match.py                # façade de compatibilité
 │   ├── reseau.py               # façade de compatibilité + entraînement
 │   └── interface.py            # façade de compatibilité
 └── test/
     ├── test_simulateur.py
-    └── test_modularisation.py
+    ├── test_modularisation.py
+    └── test_neat.py
 ```
 
 `src` reste un paquet-espace de noms, sans `src/__init__.py`. Les sous-paquets
@@ -58,11 +61,12 @@ ont des `__init__.py`. Les commandes historiques `python -m src.match`,
 | `actions` | `take_pile`, `place_pile`, `_return_home`, `construction_retenue`. |
 | `strategies` | `choose_plan`, `_play_batches`, `DROP_SITES`. |
 | `deroulement` | `play_match`. |
-| `replay` | `Replay`, `save_replay`, `LecteurReplay`. |
+| `replay` | `Replay`, `save_replay`, `LecteurReplay`, `Playback`. |
 | `reseaux` | `Network`, `features`, `EncodeurCaracteristiques`. |
 | `selection` | `Glouton`, `Aleatoire`, `MatchPolicy`. |
 | `recompenses` | `ConstructionTemps`, `Retour`, `Depots`. |
 | `evaluation` | `officiel_2027`, `_replay_rank`. |
+| `neat` | `Genome`, `NeatPolicy`, `train`, `evaluate`, `main`. |
 | `composition` | `composer`, `Profil`, `FABRIQUES`. |
 
 Les sections suivantes décrivent les symboles historiques réexportés par les
@@ -335,24 +339,25 @@ Le fichier `.npz` contient :
 
 ## `src/interface.py`
 
-Responsabilité : rendu Tkinter, commandes manuelles et lecture des replays.
+Responsabilité : rendu Tkinter, commandes manuelles, lecture des replays et tableau de bord NEAT.
 
 | Symbole | Rôle |
 | --- | --- |
-| `create_window(simulation=None, *, replay=None, trial=None)` | Construit la fenêtre. Importe `tkinter` et `PIL` à l'intérieur. |
-| `draw()` | Met à jour score, piles, robot, flèche avant, ventouses, cible et textes. |
+| `create_window(simulation=None, *, replay=None, trial=None, dashboard=None)` | Construit la fenêtre. Importe `tkinter` et `PIL` à l'intérieur. |
+| `Playback(replay, trial, *, loop=False, skip_idle=False)` | Lecture sans Tkinter : boucle, vitesse, saut de l'attente finale et remplacement du replay affiché. |
+| `draw()` | Met à jour score, piles, robot, flèche avant, ventouses, cible, traînée et textes. |
 | `fit_board(event)` | Calcule `scale` et `border`, redimensionne le tapis. |
-| `click(event)` | Clic sur une ventouse ou destination. |
-| `nudge(dx, dy)` | Déplacement clavier de 100 mm. |
-| `press`, `release`, `release_all` | Gestion des répétitions clavier. |
+| `ControleurManuel.click(event)` | Clic sur une ventouse ou destination. |
+| `DirectionsClavier` | Flèches maintenues, répétition et diagonales normalisées à 100 mm. |
+| `RepeteurClavier` | Répétition de `Q`, `D` et des touches de ventouse. |
+| `ControleurReplayTk` | Bouton pause/reprise/relance, curseur, glisser-déposer, boucle, vitesse et sondage du tableau de bord. |
 | `reset_match()` | `simulation.reset()` puis redessine. |
 | `tick()` | `simulation.advance(now - last_frame)` puis `draw()`. |
-| Contrôles replay | Bouton pause/reprise/relance, curseur, glisser-déposer. |
 
 Commandes manuelles :
 
 - clic sur le tapis : destination ;
-- flèches : ±100 mm ;
+- flèches : ±100 mm, combinables en diagonale ;
 - `Q` / `D` : ±15° ;
 - `1` à `9` et `0` : ventouses, plus les équivalents AZERTY et pavé numérique ;
 - `Échap` : quitter le plein écran ; `F11` : basculer ;
@@ -360,9 +365,42 @@ Commandes manuelles :
 
 L'interface ne contient aucune règle de jeu ni aucun calcul de collision.
 
+## `src/neat.py`
+
+Neuroévolution d'un réseau acyclique qui classe les candidats du match.
+
+| Symbole | Rôle |
+| --- | --- |
+| `Settings` | Population, générations, graine, amplitude et probabilités de mutation. |
+| `Genome` | Biais, connexions acycliques, sérialisation et matrice de poids. |
+| `observations(simulation, held, choices, ...)` | Encode 20 observations par candidat. |
+| `NeatPolicy` | Classe les prises, les déposes et la fin du chargement avec le génome. |
+| `fitness(match)` | `(score_max, -temps_score_max)`. |
+| `evaluate(genome, record_frames=False)` | Joue un match complet sans fenêtre. |
+| `train(settings, directory, publish, ...)` | Boucle générationnelle, élitisme et sauvegarde du champion. |
+| `train_background(...)` | Publie les événements et le replay pour le tableau de bord. |
+| `main()` | CLI `live`, `train`, `replay` et `verify`. |
+
+Les sessions sont écrites dans `neat/<session>/` : `champion.json` contient le génome, son replay et les paramètres, `generations.jsonl` les statistiques par génération.
+
+## `src/interface_neat.py`
+
+Tableau de bord du champion : panneau de génération et de statistiques, courbes, schéma du réseau, logs et replay en boucle.
+
+| Symbole | Rôle |
+| --- | --- |
+| `Dashboard` | Monte les panneaux, démarre le processus `spawn`, sonde la file et transmet le replay. |
+| `Dashboard.poll()` | Applique les événements reçus et renvoie `(id, replay)` au nouveau champion. |
+| `run_window(*, settings=None, directory=None, saved=None, initial=None)` | Ouvre la fenêtre en entraînement direct, en replay ou en attente du premier réseau. |
+| `_draw_network(canvas, genome)` | Dessine les entrées, les neurones cachés et la sortie. |
+
+## `test/test_neat.py`
+
+Onze tests couvrent le classement de fitness, le pic de score, le retour conservé jusqu'au buzzer, les mutations et limites du génome, la sauvegarde atomique du champion, la boucle générationnelle et `Playback` (boucle, remplacement et saut de l'attente finale).
+
 ## `test/test_simulateur.py`
 
-Deux fichiers `unittest` : `test_simulateur.py` pour le comportement historique et `test_modularisation.py` pour les contrats, capacités et isolations. Ensemble : 92 tests.
+Trois fichiers `unittest` : `test_simulateur.py` pour le comportement historique, `test_modularisation.py` pour les contrats, capacités et isolations et `test_neat.py` pour la neuroévolution. Ensemble : 104 tests.
 
 | Classe | Nombre | Couverture |
 | --- | --- | --- |

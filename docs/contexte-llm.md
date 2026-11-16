@@ -31,10 +31,13 @@ Le projet ne simule pas encore d'adversaire. Un seul robot évolue sur la table.
 | `src/selection/` | Glouton, aléatoire, epsilon, politique réseau. |
 | `src/recompenses/` | Variantes de récompense. |
 | `src/evaluation/` | Scénarios, métriques, benchmark. |
-| `src/ui/` | Thème, assets, rendu, clavier, fenêtre Tkinter. |
+| `src/ui/` | Thème, assets, rendu, clavier, fenêtre Tkinter, lecture des replays et options du tableau de bord. |
+| `src/neat.py` | Neuroévolution NEAT, génomes, fitness et champions. |
+| `src/interface_neat.py` | Tableau de bord NEAT et replay du champion. |
 | `src/simulateur.py`, `src/match.py`, `src/reseau.py`, `src/interface.py` | Façades de compatibilité. |
 | `test/test_simulateur.py` | Tests historiques. |
 | `test/test_modularisation.py` | Tests des capacités, contrats et isolations. |
+| `test/test_neat.py` | Tests de la neuroévolution et de `Playback`. |
 | `RobotRobotronik.toml` | Contour, ventouses, capacités, mouvement et planificateur. |
 | `assets/tapis_2027.png` | Image du tapis pour l'interface et les replays. |
 | `AGENTS.md` | Règles de travail du dépôt. |
@@ -106,6 +109,7 @@ python -B -m unittest discover -s test -v
 | Changer la stratégie ou les poses | `src/strategies/` | `AutomaticMatchTest`, `TrainingReplayTest`. |
 | Changer la récompense ou la sélection | `src/recompenses/`, `src/selection/` | `RewardSelectionTest`, `TrainingReplayTest`. |
 | Changer le réseau ou l'entraînement | `src/reseaux/`, `src/reseau.py` | `TrainingReplayTest`. |
+| Changer NEAT ou son tableau de bord | `src/neat.py`, `src/interface_neat.py` | `test/test_neat.py`, puis `python -B -m src.neat verify`. |
 | Changer l'affichage ou les commandes | `src/ui/` | Lancer l'interface, charger le tapis, tester les touches touchées. |
 | Changer le terrain ou le score | `src/terrains/`, `src/regles/` | Citer le règlement, `SimulationTest` et `TomlTest`. |
 | Changer le format de replay | `src/replay/` | Tests de replay et ouverture dans l'interface. |
@@ -128,11 +132,15 @@ python -B -m src.app ui
 # Comparaison réseau / référence
 python -B -m src.reseau compare
 
+# NEAT : vérifier le dernier champion et ouvrir le tableau de bord
+python -B -m src.neat verify
+python -B -m src.neat replay
+
 # Interface (vérification manuelle)
 python -B -m src.interface
 ```
 
-Le temps des 92 tests est d'environ 9 secondes sur la machine de référence. Une modification qui fait exploser ce temps doit être examinée.
+Le temps des 104 tests est d'environ 10 secondes sur la machine de référence. Une modification qui fait exploser ce temps doit être examinée.
 
 ## Glossaire
 

@@ -1,5 +1,7 @@
 """Répétition des commandes clavier du pilotage manuel."""
 
+from math import hypot
+
 
 class RepeteurClavier:
     def __init__(self, root, *, premier_delai: int = 120, delai: int = 60):
@@ -58,3 +60,51 @@ class ControleurManuel:
     def nudge(self, dx, dy):
         x, y = self.simulation.position
         self.simulation.move_to(x + dx, y + dy)
+
+
+class DirectionsClavier:
+    """Répétition des flèches maintenues, avec diagonales normalisées."""
+
+    def __init__(self, root, simulation, *, premier_delai: int = 120, delai: int = 60, distance: float = 100):
+        self.root = root
+        self.simulation = simulation
+        self.premier_delai = premier_delai
+        self.delai = delai
+        self.distance = distance
+        self.directions = {}
+        self.timer = None
+
+    def press(self, event, dx, dy):
+        if event.keycode in self.directions:
+            return
+        self.directions[event.keycode] = (dx, dy)
+        self._annuler()
+        self._avancer(self.premier_delai if len(self.directions) == 1 else self.delai)
+
+    def release(self, event):
+        if self.directions.pop(event.keycode, None) is None:
+            return False
+        self._annuler()
+        if self.directions:
+            self._avancer(self.delai)
+        return True
+
+    def release_all(self, event=None):
+        self._annuler()
+        self.directions.clear()
+
+    def _annuler(self):
+        if self.timer is not None:
+            self.root.after_cancel(self.timer)
+            self.timer = None
+
+    def _avancer(self, delay):
+        dx = sum(dx for dx, _ in self.directions.values())
+        dy = sum(dy for _, dy in self.directions.values())
+        distance = hypot(dx, dy)
+        x, y = self.simulation.position
+        if not distance:
+            self.simulation.move_to(x, y)
+            return
+        self.simulation.move_to(x + self.distance * dx / distance, y + self.distance * dy / distance)
+        self.timer = self.root.after(delay, lambda: self._avancer(self.delai))

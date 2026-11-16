@@ -22,6 +22,7 @@ class Replay:
             raise ValueError("liste d’obstacles manquante ou invalide")
         self.frames = data["frames"]
         self.obstacles = obstacles
+        self.collection = data.get("strategie") == "opti_take"
         self.times = []
         for index, frame in enumerate(self.frames, 1):
             if not isinstance(frame, dict):
@@ -44,8 +45,12 @@ class Replay:
                     and type(frame["blocked"]) is bool and type(frame["score"]) is int
                     and isinstance(frame["action"], str)):
                 raise ValueError(f"image {index} : données d’affichage invalides")
-            if index > 1 and any(len(frame[key]) != len(self.frames[0][key]) for key in ("piles", "cups")):
-                raise ValueError(f"image {index} : nombre de piles ou de ventouses incohérent")
+            if index > 1:
+                previous = self.frames[index - 2]
+                unloaded = frame["score"] - previous["score"] if self.collection else 0
+                if (unloaded < 0 or len(frame["piles"]) != len(previous["piles"]) - unloaded
+                        or len(frame["cups"]) != len(previous["cups"])):
+                    raise ValueError(f"image {index} : nombre de piles ou de ventouses incohérent")
             self.times.append(timestamp)
         self.start = self.time = self.times[0]
         self.duration = self.times[-1]

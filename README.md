@@ -76,6 +76,17 @@ python -B -m src.reseau compare
 python -B -m src.reseau train --endless
 ```
 
+**Neuroévolution NEAT et tableau de bord**
+
+```powershell
+python -B -m src.neat
+python -B -m src.neat train --generations 10
+python -B -m src.neat replay
+python -B -m src.neat verify
+```
+
+La commande unifiée accepte aussi `python -B -m src.app neat`.
+
 ## Lancer le simulateur
 
 Utilise Python 3.12 avec Tkinter. Une fois [les dépendances installées](#commandes-principales) et [le tapis préparé](#source-du-tapis), lance le pilotage manuel.
@@ -121,6 +132,23 @@ Un bip bref signale la fin d’un match automatique, d’une comparaison ou d’
 
 Le replay affiche les poses enregistrées, la cible du robot, l’action en cours, le temps écoulé, l’heure de fin et le score jaune. Clique ou fais glisser le curseur de la barre en bas pour avancer ou reculer. Le bouton à côté met en pause, reprend la lecture ou relance le replay depuis le début une fois arrivé à la fin.
 
+## Neuroévolution NEAT et tableau de bord
+
+`python -B -m src.neat` ouvre le tableau de bord et entraîne une population de génomes acycliques dans des processus séparés. À gauche, le panneau affiche la génération, le temps écoulé, le nombre de simulations et leur débit, le record, les courbes de score et de temps des 30 dernières générations et le schéma du champion. À droite, les logs défilent. **Pause** suspend les évaluations, **Arrêter et sauvegarder** termine celles qui sont lancées et écrit le champion.
+
+Le replay du meilleur réseau occupe le centre de la fenêtre. Il tourne en boucle à ×1 par défaut, charge le nouveau record au prochain départ et propose **Recommencer**, une case **Boucle** et un sélecteur de vitesse. L’affichage saute l’attente finale si le terrain et le score sont identiques au buzzer, et le tracé sur le tapis montre les dernières positions parcourues. **Agrandir** ouvre le réseau complet dans une fenêtre séparée.
+
+| Action | Commande |
+| --- | --- |
+| Entraîner et regarder le meilleur réseau en boucle | `python -B -m src.neat` |
+| Entraîner 10 générations sans fenêtre | `python -B -m src.neat train --generations 10` |
+| Rejouer le dernier champion sauvegardé | `python -B -m src.neat replay` |
+| Resimuler le génome sauvegardé et vérifier toutes les images du match | `python -B -m src.neat verify` |
+
+La population par défaut est de 200 individus. `--population` la règle, `--generations 0` entraîne sans limite et `--generations 5` fixe un budget. `--seed` fixe la graine, tirée au hasard sinon. `--sigma` règle l’amplitude des mutations de poids et de biais ; `--add-node` et `--add-link` les probabilités de mutation de structure. Après trois générations sans record, l’amplitude augmente jusqu’à trois fois sa valeur initiale et revient à sa valeur initiale quand un record est amélioré. `--directory` relit une session précise et `--from-genome` initialise une nouvelle population autour d’un champion.
+
+Chaque session écrit son champion et son replay dans `neat/<session>/champion.json`, et les résultats de chaque génération dans `generations.jsonl`. Le réseau classe les prises, les déposes et le retour à partir de 20 observations : pose et charge du robot, temps et stock restants, score courant, durée estimée, gain du dépôt et pose visée. Le planificateur vérifie ensuite les trajets. La fitness compare `(points maximum, −temps du premier maximum)` sur un match complet de 100 s ; un nouveau record est resimulé séparément pour produire le replay et vérifier son score et son horodatage.
+
 ## Modifier le robot
 
 Édite [`RobotRobotronik.toml`](RobotRobotronik.toml), puis relance le simulateur. Le fichier fournit la géométrie au moteur et à l’interface.
@@ -139,8 +167,9 @@ Le code est découpé en paquets interchangeables : `domaine`, `terrains`, `robo
 - `src/planification/` contient les algorithmes de trajet ; `src/actions/` les prises, déposes et le retour.
 - `src/strategies/` et `src/deroulement/` jouent les matchs ; `src/replay/` les enregistre et les relit.
 - `src/reseaux/`, `src/selection/` et `src/recompenses/` contiennent le réseau, les sélecteurs et les récompenses.
+- `src/neat.py` entraîne les génomes NEAT ; `src/interface_neat.py` fournit son tableau de bord.
 - `src/composition/` et `src/app.py` assemblent le tout depuis un profil.
-- `src/ui/` contient l’interface Tkinter, le pilotage manuel et la lecture des replays.
+- `src/ui/` contient l’interface Tkinter, le pilotage manuel, la lecture des replays et les options du tableau de bord.
 - `test/` contient les tests historiques et les tests de modularisation.
 - `docs/` décrit l’architecture, la structure et le domaine pour les développeurs et les assistants LLM. Le plan de modularisation est dans [`docs/plan-modularisation.md`](docs/plan-modularisation.md).
 

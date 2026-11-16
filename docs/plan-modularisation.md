@@ -1098,9 +1098,10 @@ Implémenté :
 - actions de prise, dépose, approche, retour et classes `Action` pour les constructions ;
 - stratégies de référence et par lots ;
 - déroulement du match et enregistrement des replays ;
-- replay : format, lecture, sauvegarde, index et lecteur sans Tkinter ;
+- replay : format, lecture, sauvegarde, index et lecteur sans Tkinter, avec `Playback` pour la boucle et la vitesse ;
 - infrastructure : ressources, horloge, aléa, reporting, notification ;
 - réseaux : caractéristiques, MLP, linéaire, constante, mutation, mémoire, optimiseur, stockage ;
+- neuroévolution NEAT dans `neat.py` et tableau de bord dans `interface_neat.py` ;
 - sélection : glouton, aléatoire, epsilon, politique réseau ;
 - récompenses : construction, construction + temps, retour, déposes, sparse ;
 - évaluation : scénarios, métriques, benchmark ;

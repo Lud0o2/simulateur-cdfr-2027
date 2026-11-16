@@ -1,17 +1,19 @@
+from bisect import bisect_right
 from math import cos, degrees, sin
 from time import perf_counter
 
 from ..simulateur import TABLE_HEIGHT, TABLE_WIDTH, TURN_STEP, Simulation
+from ..replay.player import Playback
 from .assets import charger_tapis
 from .canvas_renderer import etat_robot
-from .manual_controller import ControleurManuel, RepeteurClavier
+from .manual_controller import ControleurManuel, DirectionsClavier, RepeteurClavier
 from .replay_controller import ControleurReplayTk
 from .theme import Theme
 
 BORDER = 22
 
 
-def create_window(simulation: Simulation | None = None, *, replay=None, trial=None):
+def create_window(simulation: Simulation | None = None, *, replay=None, trial=None, dashboard=None):
     import tkinter as tk
     from tkinter import ttk
 
@@ -29,6 +31,8 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     font = theme.font
     root = tk.Tk()
     mode = "Pilotage manuel" if replay is None else f"Replay · Essai {trial}"
+    if dashboard is not None:
+        mode = "Replay du meilleur réseau"
     root.title(f"CDFR 2027 · {mode}")
     root.configure(bg=background, padx=20, pady=16)
     width = min(1000, root.winfo_screenwidth() - 48)
@@ -38,7 +42,6 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     root.bind("<Escape>", lambda _event: root.attributes("-fullscreen", False))
     root.bind("<F11>", lambda _event: root.attributes("-fullscreen", not root.attributes("-fullscreen")))
     content = tk.Frame(root, bg=background)
-    content.pack(fill="both", expand=True)
     content.columnconfigure(0, weight=1)
     content.rowconfigure(1, weight=1)
 
@@ -55,20 +58,32 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
         bordercolor=surface, lightcolor=accent, darkcolor=accent, focuscolor=accent,
         sliderlength=14, arrowsize=9, gripcount=0,
     )
+    if dashboard is not None:
+        dashboard.mount(root)
+    content.pack(fill="both", expand=True)
+    playback = Playback(replay, trial, loop=dashboard is not None,
+                        skip_idle=dashboard is not None) if replay is not None else None
 
     header = tk.Frame(content, bg=background)
     header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
     heading = tk.Frame(header, bg=background)
     heading.pack(side="left")
-    tk.Label(
-        heading, text="CDFR 2027", font=(font, 20, "bold"),
-        bg=background, fg=foreground,
-    ).pack(anchor="w")
-    tk.Label(heading, text=mode, bg=background, fg=muted, font=(font, 10)).pack(anchor="w")
+    if dashboard is None:
+        tk.Label(
+            heading, text="CDFR 2027", font=(font, 20, "bold"),
+            bg=background, fg=foreground,
+        ).pack(anchor="w")
+    subtitle = tk.Label(heading, text=mode if dashboard is None else "Replay",
+                        bg=background, fg=muted, font=(font, 10))
+    subtitle.pack(anchor="w")
 
     scoreboard = tk.Frame(header, bg=surface, padx=12, pady=5)
     scoreboard.pack(side="right")
-    tk.Label(scoreboard, text="Score jaune", bg=surface, fg=muted, font=(font, 9)).pack(side="left")
+    collection = replay is not None and replay.collection
+    score_label = "Score" if dashboard is not None else "Score jaune"
+    if collection:
+        score_label = "Piles ramenées"
+    tk.Label(scoreboard, text=score_label, bg=surface, fg=muted, font=(font, 9)).pack(side="left")
     score = tk.Label(scoreboard, bg=surface, fg=yellow, font=(font, 19, "bold"), width=3)
     score.pack(side="left", padx=(8, 0))
 
@@ -97,10 +112,11 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     ]
     block_items = [
         canvas.create_polygon(0, 0, 0, 0, 0, 0, 0, 0, fill="#c99d68", outline="#553b24", width=2)
-        for _ in (simulation.blocks if replay is None else replay.frame["piles"])
+        for _ in (simulation.blocks if replay is None else replay.frames[0]["piles"])
     ]
+    trace = canvas.create_line(0, 0, 0, 0, fill="#8baea1", width=2, state="hidden") if dashboard else None
     path = canvas.create_line(0, 0, 0, 0, fill=accent, width=2, dash=(4, 5), state="hidden")
-    cups_at_start = simulation.suction_cups if replay is None else replay.frame["cups"]
+    cups_at_start = simulation.suction_cups if replay is None else replay.frames[0]["cups"]
     # Le châssis masque les supports intérieurs, y compris dans les anciens replays.
     supports = [canvas.create_line(0, 0, 0, 0, fill=accent, width=2) for _ in cups_at_start]
     robot = canvas.create_polygon(0, 0, 0, 0, 0, 0, fill=background, outline=accent, width=2)
@@ -122,15 +138,35 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
             cups = ((cup.position, cup.enabled) for cup in simulation.suction_cups)
             target, blocked, label = etat_robot(simulation)
         else:
-            frame = replay.frame
+            current = playback.replay
+            frame = current.frame
             points, position, angle = frame["score"], frame["position"], frame["heading"]
             footprint, piles, cups = frame["robot"], frame["piles"], frame["cups"]
             target, blocked, label = frame["target"], frame["blocked"], frame["action"]
-            readout.configure(text=f"{replay.time:.1f} s · fin à {replay.duration:.1f} s")
+            if dashboard is not None:
+                subtitle.configure(text=f"Replay #{playback.trial}" if playback.trial is not None else "Replay")
+                x, y = position
+                time = (f"{current.time:.1f} / {playback.end:.1f} s · X {x:.0f} Y {y:.0f} mm"
+                        f" · {degrees(angle) % 360:.0f}°")
+                start = bisect_right(current.times, current.time - 5)
+                end = bisect_right(current.times, current.time)
+                trail = [border + value * scale for previous in current.frames[start:end:2]
+                         for value in previous["position"]]
+                if len(trail) >= 4:
+                    canvas.coords(trace, *trail)
+                canvas.itemconfigure(trace, state="normal" if len(trail) >= 4 else "hidden")
+            else:
+                time = f"{current.time:.1f} s · fin à {current.duration:.1f} s"
+            readout.configure(text=time)
 
         score.configure(text=str(points))
         for item, corners in zip(block_items, piles):
             canvas.coords(item, *(border + value * scale for corner in corners for value in corner))
+            if collection:
+                canvas.itemconfigure(item, state="normal")
+        if collection:
+            for item in block_items[len(piles):]:
+                canvas.itemconfigure(item, state="hidden")
         x, y = position
         screen_x, screen_y = border + scale * x, border + scale * y
         vertices = [(screen_x + scale * dx, screen_y + scale * dy) for dx, dy in footprint]
@@ -179,7 +215,7 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     viewport.bind("<Configure>", fit_board)
 
     if replay is not None:
-        ControleurReplayTk(root, footer, replay, surface, draw, tk=tk, ttk=ttk)
+        ControleurReplayTk(root, footer, playback, draw, theme=theme, tk=tk, ttk=ttk, dashboard=dashboard)
         return root
 
     cup_targets = {item: number for number, items in enumerate(cup_items, 1) for item in items}
@@ -200,13 +236,17 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
 
     manuel = ControleurManuel(canvas, simulation, cup_targets=cup_targets,
                               etat=lambda: (scale, border))
-    click = manuel.click
-    nudge = manuel.nudge
 
     clavier = RepeteurClavier(root)
-    press = clavier.press
-    release = clavier.release
-    release_all = clavier.release_all
+    directions = DirectionsClavier(root, simulation)
+
+    def release(event):
+        clavier.release(event)
+        directions.release(event)
+
+    def release_all(event=None):
+        clavier.release_all()
+        directions.release_all()
 
     def reset_match():
         nonlocal last_frame
@@ -218,16 +258,18 @@ def create_window(simulation: Simulation | None = None, *, replay=None, trial=No
     ttk.Button(header, text="Reset match", command=reset_match, style="Panel.TButton").pack(
         side="right", before=scoreboard, padx=(0, 10),
     )
-    canvas.bind("<Button-1>", click)
+    canvas.bind("<Button-1>", manuel.click)
     root.bind("<KeyRelease>", release)
     root.bind("<FocusOut>", release_all)
-    for key, dx, dy in (("Left", -100, 0), ("Right", 100, 0), ("Up", 0, -100), ("Down", 0, 100)):
-        root.bind(f"<KeyPress-{key}>", lambda event, dx=dx, dy=dy: press(event, lambda: nudge(dx, dy)))
+    for key, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, -1), ("Down", 0, 1)):
+        root.bind(f"<KeyPress-{key}>", lambda event, dx=dx, dy=dy: directions.press(event, dx, dy))
     for key, angle in (("q", -TURN_STEP), ("Q", -TURN_STEP), ("d", TURN_STEP), ("D", TURN_STEP)):
-        root.bind(f"<KeyPress-{key}>", lambda event, angle=angle: press(event, lambda: simulation.turn_by(angle)))
+        root.bind(f"<KeyPress-{key}>", lambda event, angle=angle: clavier.press(
+            event, lambda: simulation.turn_by(angle),
+        ))
     for number, (digit, azerty) in enumerate(digit_keys, 1):
         for key in (digit, azerty, f"KP_{digit}"):
-            root.bind(f"<KeyPress-{key}>", lambda event, n=number: press(
+            root.bind(f"<KeyPress-{key}>", lambda event, n=number: clavier.press(
                 event, lambda: simulation.toggle_suction(n), repeats=False,
             ))
 

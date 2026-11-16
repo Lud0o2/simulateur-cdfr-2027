@@ -36,8 +36,9 @@ app.py / cli
 | `selection` | Glouton, aléatoire, epsilon, politique réseau. | `reseaux`, `strategies`. |
 | `recompenses` | Variantes de récompense. | `domaine`, `regles`. |
 | `evaluation` | Scénarios, métriques, benchmark. | `deroulement`. |
+| `neat` | Génomes, mutations, fitness, champions, tableau de bord et CLI NEAT. | `deroulement`, `physique`, `replay`, `reseaux`, `strategies`, `ui`. |
 | `composition` | Profil, registre et assemblage par défaut. | Tous les adaptateurs. |
-| `ui` | Thème, assets, rendu, clavier, fenêtre Tkinter. | `physique`, `simulateur`. |
+| `ui` | Thème, assets, rendu, clavier, fenêtre Tkinter et options du tableau de bord. | `physique`, `replay`, `simulateur`. |
 
 Les dépendances autorisées vont du domaine vers l'application, jamais
 l'inverse. Un test d'isolation vérifie que `domaine` n'importe ni Pymunk, ni
@@ -51,7 +52,7 @@ l'interface au niveau module.
 | `src/simulateur.py` | Réexporte le domaine, le terrain, le robot, les règles et `Simulation`. |
 | `src/match.py` | Réexporte la planification, les actions, les stratégies, le déroulement et les replays. |
 | `src/reseau.py` | Réexporte les caractéristiques, le réseau, la politique, la mutation et les métriques ; garde la boucle d'entraînement. |
-| `src/interface.py` | Réexporte `create_window` depuis `ui/window.py`. |
+| `src/interface.py` | Réexporte `Playback` et `create_window` depuis `replay/player.py` et `ui/window.py`. |
 
 ## Flux d'exécution
 
@@ -141,7 +142,27 @@ python -m src.reseau train
 
 Le mode `--endless` enchaîne les séries : il repart d'un réseau aléatoire après `PROGRESS_WINDOW = 50` matchs sans amélioration et sauvegarde le meilleur replay de chaque série.
 
-### 5. Lecture d'un replay
+### 5. Neuroévolution NEAT
+
+```text
+python -m src.neat [live|train|replay|verify]
+  -> Settings / Genome
+  -> train(...)
+       -> ProcessPoolExecutor
+            -> evaluate(genome)
+                 -> play_match(Simulation(), policy=NeatPolicy(genome),
+                               drop_poses=DROP_POSES, full_match=True, record_frames=False)
+                 -> (score_max, -temps_score_max)
+       -> offspring(...) puis génération suivante
+       -> write_champion(...) : genome + replay complet
+  -> train_background(...) publie les événements au tableau de bord
+       -> Dashboard.poll()
+            -> Playback.offer(...) au prochain départ de boucle
+```
+
+En direct, `create_window(replay=..., dashboard=...)` monte le panneau NEAT et un processus `spawn` entraîne la population. Le replay du champion tourne en boucle pendant l'entraînement ; la case **Boucle**, le sélecteur de vitesse et **Recommencer** pilotent `Playback`. `full_match=True` avance le match jusqu'au buzzer et ajoute `score_max` et `temps_score_max` au replay.
+
+### 6. Lecture d'un replay
 
 ```text
 python -m src.match replay [numéro]

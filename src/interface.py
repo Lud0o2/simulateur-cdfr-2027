@@ -1,8 +1,9 @@
 """Façade de compatibilité de l'interface Tkinter."""
 
+from .replay.player import Playback
 from .ui.window import create_window
 
-__all__ = ["create_window"]
+__all__ = ["Playback", "create_window"]
 
 
 if __name__ == "__main__":
